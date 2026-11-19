@@ -79,9 +79,9 @@ bool AgentHome::hasProgram(const std::string& version) const {
 void AgentHome::versions(std::vector<std::string>* out) const {
     std::vector<std::string> names;
     out->clear();
-    if (!fs::listDir(dir_, &names, 0)) return;
+    if (!fs::listDir(versions_, &names, 0)) return;
     for (size_t i = 0; i < names.size(); ++i) {
-        if (validVersionName(names[i]) && fs::kindOf(dir_ + "/" + names[i]) == fs::kDir) out->push_back(names[i]);
+        if (validVersionName(names[i]) && fs::kindOf(versions_ + "/" + names[i]) == fs::kDir) out->push_back(names[i]);
     }
 }
 
@@ -180,7 +180,7 @@ bool AgentHome::removeVersion(const std::string& version, std::string* error) co
         return false;
     }
     bool ok = fs::removeTree(versionDir(version), error);
-    fs::syncDir(dir_);
+    fs::syncDir(versions_);
     return ok;
 }
 

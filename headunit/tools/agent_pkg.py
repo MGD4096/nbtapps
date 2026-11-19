@@ -47,6 +47,7 @@ import tempfile
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "tools"))
 import nbtpkg  # noqa: E402
+import platforms  # noqa: E402
 
 PACKAGE_ID = "org.nbtapp.agent"
 PROGRAMS = ("nbtagent", "nbtctl")
@@ -58,8 +59,8 @@ SCRIPTS_DIR = os.path.join(ROOT, "agent")
 VERSION_FILE = "version"
 TEMPLATE = os.path.join(ROOT, "agent", "package", "manifest.json.in")
 HEADER = os.path.join(ROOT, "agent", "embedded_keys.hpp")
-RELEASE = os.path.join(ROOT, "release", "agent")
-PKG_DIR = os.path.join(ROOT, "release", "pkg")
+RELEASE = os.path.join(platforms.RELEASE_ROOT, "agent")   # release/entryevo/agent with NBT_PLATFORM=entryevo
+PKG_DIR = os.path.join(platforms.RELEASE_ROOT, "pkg")
 # What can stand for a version in the template's text. Whether it is a version is the manifest check's to say.
 VERSION_TEXT = r"[0-9A-Za-z.+-]{1,64}"
 BUILD_STRING = rb"\(build ([^)%]{1,80})\), head unit"

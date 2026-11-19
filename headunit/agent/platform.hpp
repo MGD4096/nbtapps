@@ -51,6 +51,13 @@ public:
     // the launcher starts. /var/opt/nbtapp/agent on the head unit. It is there only where the agent was put
     // onto the machine that way: the platform does not make it.
     virtual std::string agentHome() const = 0;
+    // Where the versions' folders of the agent are, which hold its programs (agent_home.hpp): agentHome() itself,
+    // unless the partition that holds it does not run programs. On EntryEvo, whose /var/local is noexec, a folder on
+    // the system partition, which is remounted for a write as ${plugins} is.
+    virtual std::string agentVersionsDir() const { return agentHome(); }
+    // Whether the check aa-fix (checks.hpp) looks for an app installed by hand in /opt/aa with the connector id 210.
+    // Not on EntryEvo, where that is the Android Auto app (EntryAad) that the user installed and keeps.
+    virtual bool checksHandApp() const { return true; }
     // Every folder the HMI loads plugins from: pluginsDir(), varPluginsDir(), and any other, such as the stock,
     // read-only one on a head unit whose ${plugins} is the writable one. The ids and the plugin names already in
     // use are read from all of them, so those of an app copied into one by hand are seen.

@@ -155,6 +155,27 @@ int main(int argc, char** argv) {
     CHECK(!home.placeStarter("../agent/1.0.0", &why) && fs::kindOf(home.dir() + "/launcher") == fs::kNone);
     CHECK(!validVersionName(kStarterInPlace) && std::string(kAgentLauncher) == "nbtlaunch.sh" && std::string(kAgentStarter) == "nbtstart.sh");
 
+    // 10. The versions in a folder of their own (EntryEvo: the files on the noexec /var/local, the versions on the
+    // system partition). The files are read and written where they were; the versions are looked for, listed,
+    // read and removed in the other folder, and nothing of them is looked for beside the files.
+    AgentHome split(work + "/files", work + "/programs");
+    CHECK(split.dir() == work + "/files" && split.versionsDir() == work + "/programs" &&
+          split.versionDir("1.0.0") == work + "/programs/1.0.0");
+    CHECK(AgentHome(work + "/files", "").versionsDir() == work + "/files" && home.versionsDir() == home.dir());
+    put(split.versionDir("1.0.0") + "/nbtagent", "#!/bin/sh\n", 0755);
+    put(split.versionDir("1.0.0") + "/nbtlaunch.sh", "#!/bin/sh\n", 0755);
+    put(split.versionDir("1.0.0") + "/nbtstart.sh", newer, 0644);
+    put(split.dir() + "/2.0.0/nbtagent", "#!/bin/sh\n", 0755);              // beside the files: not a version here
+    put(split.dir() + "/2.0.0/nbtlaunch.sh", "#!/bin/sh\n", 0755);
+    CHECK_IN(why, split.writeCurrent("1.0.0", &why) && testutil::readFile(split.dir() + "/current") == "1.0.0\n");
+    CHECK(split.hasProgram("1.0.0") && !split.hasProgram("2.0.0"));
+    split.versions(&versions);
+    CHECK(versions.size() == 1 && versions[0] == "1.0.0");
+    CHECK_IN(why, split.placeStarter("1.0.0", &why) && testutil::readFile(split.dir() + "/launcher") == newer);
+    CHECK(fs::kindOf(split.versionsDir() + "/launcher") == fs::kNone && split.starterOf("1.0.0") == AgentHome::kStarterSame);
+    CHECK(split.removeVersion("1.0.0", &why) && fs::kindOf(split.versionDir("1.0.0")) == fs::kNone);
+    CHECK(fs::kindOf(split.dir() + "/2.0.0/nbtagent") == fs::kFile && fs::kindOf(split.dir() + "/current") == fs::kFile);
+
     CHECK(fs::removeTree(work, &why));
     printf("test_agent_home: ok\n");
     return 0;

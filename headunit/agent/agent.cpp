@@ -698,7 +698,7 @@ void Agent::confirmTrial(Session* s) {
 
 bool Agent::autostartAvailable(std::string* code, std::string* message, bool* plugin) const {
     *plugin = false;
-    AgentHome home(platform_->agentHome());
+    AgentHome home(platform_->agentHome(), platform_->agentVersionsDir());
     if (!home.hasStarter()) {
         *code = "no-launcher";
         *message = "no starter is in " + home.dir() + ": this agent was not put here for one to start, with the head unit or otherwise";
@@ -728,7 +728,7 @@ bool Agent::autostartAvailable(std::string* code, std::string* message, bool* pl
 }
 
 std::string Agent::autostartState() const {
-    AgentHome home(platform_->agentHome());
+    AgentHome home(platform_->agentHome(), platform_->agentVersionsDir());
     std::string code, message;
     bool plugin = false, available = autostartAvailable(&code, &message, &plugin);
     json::Writer w;
@@ -765,7 +765,7 @@ void Agent::autostartSet(Session* s, int64_t id, const json::Value& params) {
         refuse(s, id, code.c_str(), message);
         return;
     }
-    AgentHome home(platform_->agentHome());
+    AgentHome home(platform_->agentHome(), platform_->agentVersionsDir());
     if (!home.setAutostart(on.boolean(), &why)) {
         refuse(s, id, "io-error", std::string("the file ") + kAutostartSwitch + " could not be " + (on.boolean() ? "written: " : "removed: ") + why);
         return;

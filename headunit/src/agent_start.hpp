@@ -143,16 +143,30 @@ struct Paths {
     std::string lock;    // where a running starter keeps its process id (nbtstart.sh)
     std::string shell;   // what runs the launcher
 
+#ifdef NBT_ENTRYEVO
+    // EntryEvo: the agent's files on the writable partition, as HeadUnitConfig::entryEvo() and hu_install.sh have
+    // them; the starter is a script, which sh reads from there although the partition runs no programs.
+    Paths() : home("/var/local/data/nbtapp/agent"), lock("/tmp/nbtapp/log/launcher.pid"), shell("/bin/sh") {}
+#else
     Paths() : home("/var/opt/nbtapp/agent"), lock("/tmp/nbtapp/log/launcher.pid"), shell("/bin/ksh") {}
+#endif
 };
 
 // What a shell on a head unit has, and the launcher's wait: kDelayS with the head unit, 0 by hand.
 inline std::vector<std::string> headUnitEnvironment(int delayS) {
     std::vector<std::string> vars;
+#ifdef NBT_ENTRYEVO
+    // As EntryAad's docs/INSTALLATION.md runs programs on an EntryEvo head unit.
+    vars.push_back("PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin");
+    vars.push_back("LD_LIBRARY_PATH=/usr/local/lib:/opt/hmi/lib:/usr/lib:/lib");
+    vars.push_back("HOME=/tmp");
+    vars.push_back("SHELL=/bin/sh");
+#else
     vars.push_back("PATH=/bin:/opt/os/bin:/opt/sys/bin:/opt/core/bin:/opt/car/bin");
     vars.push_back("LD_LIBRARY_PATH=/lib:/usr/lib:/opt/os/lib:/opt/sys/lib:/opt/core/lib:/opt/car/lib");
     vars.push_back("HOME=/tmp");
     vars.push_back("SHELL=/bin/ksh");
+#endif
     char delay[32];
     snprintf(delay, sizeof delay, "NBT_LAUNCH_DELAY=%d", delayS);
     vars.push_back(delay);
@@ -247,10 +261,15 @@ inline long spawnLauncher(const Paths& paths, const std::vector<std::string>& en
             posix_spawnattr_setsigmask(&attr, &none);
             posix_spawnattr_setsigdefault(&attr, &defaults);
             for (int fd = 0; e == 0 && fd < 3; ++fd) e = posix_spawn_file_actions_adddup2(&files, null, fd);
-            // A build host's child starts with every file of the parent's, so the rest are closed one by one.
+            // A Linux child starts with every file of the parent's, so the rest are closed one by one: only those
+            // that are open, because glibc 2.15 (EntryEvo) ends the child with status 127 before the exec when a
+            // close action finds no file, and the parent hears of no failure.
             long top = sysconf(_SC_OPEN_MAX);
             if (top < 0 || top > 1024) top = 1024;
-            for (int fd = 3; e == 0 && fd < top; ++fd) e = posix_spawn_file_actions_addclose(&files, fd);
+            for (int fd = 3; e == 0 && fd < top; ++fd) {
+                if (fd != null && fcntl(fd, F_GETFD) != -1) e = posix_spawn_file_actions_addclose(&files, fd);
+            }
+            if (e == 0 && null > 2) e = posix_spawn_file_actions_addclose(&files, null);
             if (e == 0) e = posix_spawn(&pid, args[0], &files, &attr, args, &vars[0]);
             posix_spawn_file_actions_destroy(&files);
         }

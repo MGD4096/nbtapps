@@ -110,7 +110,7 @@ int main(int argc, char** argv) {
     CHECK(car.shell == "/bin/ksh" && starterText.compare(0, 11, "#!/bin/ksh\n") == 0 && launcherText.compare(0, 11, "#!/bin/ksh\n") == 0);
     // The starter has the same shell run a version's launcher, by the name the starter looks for in a version's folder.
     CHECK(has(starterText, "SH=${NBT_TEST_LAUNCH_SH:-" + car.shell + "}") &&
-          has(starterText, std::string("\"$SH\" \"$AGENT_HOME/$VERSION/") + kAgentLauncher + "\""));
+          has(starterText, std::string("\"$SH\" \"$VERSIONS/$VERSION/") + kAgentLauncher + "\""));
     std::vector<std::string> carVars = headUnitEnvironment(kDelayS);
     CHECK(carVars.size() == 5 && carVars[0].compare(0, 10, "PATH=/bin:") == 0 && carVars[4] == "NBT_LAUNCH_DELAY=15");
     // By hand there is no wait, which the launcher takes as none.

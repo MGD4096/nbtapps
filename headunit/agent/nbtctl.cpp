@@ -626,7 +626,7 @@ int usage() {
             "  unset   ID KEY           take one out of its file: the package's default holds\n"
             "  call METHOD [JSON]\n"
             "The socket is $NBT_AGENT_SOCKET if --socket is not given"
-#ifdef __QNXNTO__
+#if defined(__QNXNTO__) || defined(NBT_ENTRYEVO)
             ", and %s if that is not set either.\n",
             kHeadUnitSocket
 #else
@@ -907,7 +907,7 @@ int main(int argc, char** argv) {
             args.push_back(arg);
         }
     }
-#ifdef __QNXNTO__
+#if defined(__QNXNTO__) || defined(NBT_ENTRYEVO)
     if (socketPath.empty()) socketPath = kHeadUnitSocket;
 #endif
     if (args.empty() || socketPath.empty()) return usage();

@@ -47,6 +47,18 @@
 // PluginApp vtable with onInit / onError / onFinalize replaced, which is what a C++ subclass would do.
 //
 // Log: slog major 0x4e42 (`sloginfo -m 20034`, or `sloginfo | grep NbtApp`). A pairing code is never logged.
+//
+// EntryEvo (NBT_ENTRYEVO: Linux armhf, the same HMI and the same PluginApp ABI, from the EntryEvo Android Auto
+// project's libEntryAad.so). What differs:
+//   - the plugin folder is /opt/hmi/data/ro/Plugins, and the agent's files are in /var/local/data/nbtapp
+//     (agent_start.hpp);
+//   - Linux has no slog. The log is /var/local/data/nbtapp/plugin.log, on flash, written only while the file
+//     /var/local/data/nbtapp/plugin-log is there (`touch` it to have one), and kept under 512 KB with one older
+//     file, plugin.log.1;
+//   - the kill switch is /var/local/data/nbtapp/disable;
+//   - the About page's list model goes through symbols looked up when it is shown: the EntryEvo Android Auto
+//     project never used them, so the library does not ask the loader for them, and the page stays empty, and says
+//     so in the log, on a framework that lacks one.
 #include <stdio.h>
 #include <stdarg.h>
 #include <stdint.h>
@@ -60,6 +72,10 @@
 #ifdef __QNX__
 #include <sys/slog.h>
 #include <sys/slogcodes.h>
+#endif
+#ifdef NBT_ENTRYEVO
+#include <dlfcn.h>
+#include <fcntl.h>
 #endif
 #include <time.h>
 #include "agent_start.hpp"
@@ -80,8 +96,16 @@ const char kBuildLine[] = "NBTApp plugin " NBT_PLUGIN_VERSION " (build " NBT_APP
 
 // Kill switch on the persistence partition (/var/opt is writable at runtime): `mkdir -p /var/opt/nbtapp &&
 // touch /var/opt/nbtapp/disable` makes create() return no app, so iDrive shows no entry after the next HMI start,
-// and the plugin does not start the agent.
+// and the plugin does not start the agent. On EntryEvo the partition is /var/local.
+#ifdef NBT_ENTRYEVO
+const char* const kDisableFile = "/var/local/data/nbtapp/disable";
+const char* const kLogSwitch = "/var/local/data/nbtapp/plugin-log";
+const char* const kLogFile = "/var/local/data/nbtapp/plugin.log";
+const char* const kLogFileOld = "/var/local/data/nbtapp/plugin.log.1";
+const off_t kLogMostBytes = 512 * 1024;
+#else
 const char* const kDisableFile = "/var/opt/nbtapp/disable";
+#endif
 
 // About page (NbtApp.xml hmiState 12): a non-selectable <list> on a Richtext raListModel holding a 1x1 table whose
 // cell is a text of our text DB. The HMI wraps it to the screen width and honours "\n" in the text.
@@ -155,6 +179,24 @@ void alog(const char* fmt, ...) {
     va_end(ap);
 #ifdef __QNX__
     slogf(_SLOG_SETCODE(0x4e42, 1), _SLOG_INFO, "[NbtApp] %s", msg);
+#elif defined(NBT_ENTRYEVO)
+    // One write per line, on the HMI's thread, with nothing kept open between two lines.
+    struct stat st;
+    if (stat(kLogSwitch, &st) != 0) return;
+    if (stat(kLogFile, &st) == 0 && st.st_size > kLogMostBytes) rename(kLogFile, kLogFileOld);
+    char line[480];
+    time_t now = time(NULL);
+    struct tm tmv;
+    localtime_r(&now, &tmv);
+    int n = snprintf(line, sizeof line, "%04d-%02d-%02d %02d:%02d:%02d [NbtApp] %s\n", tmv.tm_year + 1900, tmv.tm_mon + 1,
+                     tmv.tm_mday, tmv.tm_hour, tmv.tm_min, tmv.tm_sec, msg);
+    if (n <= 0) return;
+    if (n >= (int)sizeof line) n = (int)sizeof line - 1;
+    int fd = open(kLogFile, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+    if (fd < 0) return;
+    ssize_t written = write(fd, line, (size_t)n);
+    (void)written;
+    close(fd);
 #else
     fprintf(stderr, "[NbtApp] %s\n", msg);
 #endif
@@ -168,6 +210,7 @@ bool fileExists(const char* p) {
 void* g_vtbl[2 + bmw::kPluginAppVtblSlots];  // [offset-to-top, typeinfo, slots...] copied from bmw::PluginApp's vtable
 bmw::PluginApp* g_app = NULL;
 
+#ifndef NBT_ENTRYEVO
 void showAbout(bmw::PluginApp* app) {
     bmw::Map<unsigned, bmw::Variant> cells;
     bmw::DataTableBase table(&cells, 1);
@@ -177,6 +220,46 @@ void showAbout(bmw::PluginApp* app) {
     v.m_obj = new bmw::Variant::ObjectContainer<bmw::TextID>(bmw::TextID(kAboutText));
     app->updateModel(kAboutModel, table);
 }
+#else
+// The same as NBT Evo's showAbout, with the four functions of the framework it calls looked up by their mangled
+// names (stubs/*.syms) instead of linked: what NBT Evo's showAbout builds on the stack, by the layouts in
+// hu_framework.hpp. A member function is called as a plain function whose first argument is the object (ARM EABI).
+void showAbout(bmw::PluginApp* app) {
+    typedef bmw::Variant* (*MapIndex)(void* map, const unsigned* key);
+    typedef void (*MapDestroy)(void* map);
+    typedef void (*TableMake)(void* table, void* map, unsigned columns);
+    typedef void (*UpdateTable)(bmw::PluginApp* app, unsigned model, const void* table);
+    MapIndex index = reinterpret_cast<MapIndex>(dlsym(RTLD_DEFAULT, "_ZN3bmw3MapIjNS_7VariantEEixERKj"));
+    MapDestroy destroy = reinterpret_cast<MapDestroy>(dlsym(RTLD_DEFAULT, "_ZN3bmw3MapIjNS_7VariantEED1Ev"));
+    TableMake make = reinterpret_cast<TableMake>(dlsym(RTLD_DEFAULT, "_ZN3bmw13DataTableBaseC1EPNS_3MapIjNS_7VariantEEEj"));
+    UpdateTable update =
+        reinterpret_cast<UpdateTable>(dlsym(RTLD_DEFAULT, "_ZN3bmw9PluginApp11updateModelEjRKNS_13DataTableBaseE"));
+    if (index == 0 || destroy == 0 || make == 0 || update == 0) {
+        alog("about: the framework has no list model of the kind the About page needs (map %d/%d, table %d, update %d): "
+             "the page stays empty", index != 0, destroy != 0, make != 0, update != 0);
+        return;
+    }
+    // bmw::Map<unsigned, Variant>, as its inline constructor in hu_framework.hpp makes it.
+    struct MapWords {
+        void* table;
+        unsigned hashSize, count;
+        void* free;
+        void* blocks;
+        unsigned blockSize;
+        unsigned char spare[16];
+    } cells = {0, 17, 0, 0, 0, 10, {0}};
+    unsigned char table[16] = {0};
+    make(table, &cells, 1);
+    unsigned key = 0;
+    bmw::Variant* v = index(&cells, &key);
+    if (v != 0) {
+        delete v->m_obj;                     // fresh cell: NULL; ~Map frees whatever is left
+        v->m_obj = new bmw::Variant::ObjectContainer<bmw::TextID>(bmw::TextID(kAboutText));
+        update(app, kAboutModel, table);
+    }
+    destroy(&cells);
+}
+#endif
 
 // ---- the timer -----------------------------------------------------------------------------------------------------
 // post() takes a bmw::Runnable, whose base destructor the HU Framework does not export, so a class of ours cannot
@@ -497,8 +580,15 @@ bmw::PluginApp* createApp(bmw::IDispatcher& dispatcher, const char* name, const 
     g_vtbl[2 + bmw::kSlotOnFinalize] = reinterpret_cast<void*>(&appOnFinalize);
     *reinterpret_cast<void***>(app) = g_vtbl + 2;
 
-    // The timer's object says it is a bmw::Runnable to whoever asks its type.
+    // The timer's object says it is a bmw::Runnable to whoever asks its type. On EntryEvo the type info is taken
+    // from the framework's own vtable of bmw::Runnable, as libEntryAad.so takes it (its bmw_framework.cpp), so the
+    // library asks the loader for nothing that app did not.
+#ifdef NBT_ENTRYEVO
+    void** runnable = reinterpret_cast<void**>(dlsym(RTLD_DEFAULT, "_ZTVN3bmw8RunnableE"));
+    g_tickVtbl[1] = runnable != 0 ? runnable[1] : 0;
+#else
     g_tickVtbl[1] = const_cast<void*>(static_cast<const void*>(&typeid(bmw::Runnable)));
+#endif
     try {
         g_screens = new Screens(app);
     } catch (...) {

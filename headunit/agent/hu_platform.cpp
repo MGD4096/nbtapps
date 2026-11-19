@@ -102,6 +102,48 @@ HeadUnitConfig HeadUnitConfig::car() {
     return c;
 }
 
+// EntryEvo (EntryNav2): one ARMv7 machine under Linux 3.12, glibc 2.15, BusyBox. "EntryAad" is what the EntryEvo
+// Android Auto project (EntryEvo-Android-Auto) does on one, by hand and from its iDrive app, which this is taken
+// from; nothing here has been read off a car by hu_probe.sh yet:
+//   - /var/local, the writable partition, is noexec (EntryAad, docs/ARCHITECTURE.md): its programs are in /opt/aa,
+//     on the system partition. So the agent's state, its files and every ${data} are under /var/local/data/nbtapp,
+//     and the programs, the agent's versions and every ${app}, under /opt/nbtapp, which a step remounts for.
+//   - The system partition is / and is remounted with `mount -o remount,rw /` and `-o remount,ro /` (EntryAad,
+//     docs/INSTALLATION.md). /tmp is on memory.
+//   - The HMI loads plugins from /opt/hmi/data/ro/Plugins (EntryAad's libEntryAad.so is there). No second folder is
+//     known: varPluginsDir names the one that would match NBT Evo's, and the engine refuses a package for it unless
+//     the folder that holds it is there.
+//   - No program that restarts the HMI alone is known; EntryAad has the unit rebooted. So an HMI restart is a
+//     reboot here, which takes longer and does the same for a plugin.
+//   - Hooks run under BusyBox's sh.
+//   - /opt/aa and the connector id 210 are EntryAad's own, so aa-fix does not look for them.
+HeadUnitConfig HeadUnitConfig::entryEvo() {
+    HeadUnitConfig c;
+    c.stateDir = "/var/local/data/nbtapp";
+    c.stagingDir = "/var/local/data/nbtapp/staging";
+    c.runDir = "/tmp/nbtapp";
+    c.appsDir = "/opt/nbtapp/apps";
+    c.dataDir = "/var/local/data/nbtapp/data";
+    c.tmpDir = "/tmp/nbtapp/apps";
+    c.pluginsDir = "/opt/hmi/data/ro/Plugins";
+    c.varPluginsDir = "/var/opt/hmi/data/Plugins";
+    c.agentDir = "/var/local/data/nbtapp/agent";
+    c.agentProgramsDir = "/opt/nbtapp/agent";
+    c.checkHandApp = false;
+    c.systemMount = "/";
+    const char* writable[] = {"/bin/mount", "-o", "remount,rw", "/"};
+    const char* readOnly[] = {"/bin/mount", "-o", "remount,ro", "/"};
+    const char* reboot[] = {"/sbin/reboot"};
+    c.remountWritable.assign(writable, writable + sizeof writable / sizeof writable[0]);
+    c.remountReadOnly.assign(readOnly, readOnly + sizeof readOnly / sizeof readOnly[0]);
+    c.restartHmi.assign(reboot, reboot + sizeof reboot / sizeof reboot[0]);
+    c.reboot.assign(reboot, reboot + sizeof reboot / sizeof reboot[0]);
+    c.shell = "/bin/sh";
+    c.hookPath = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
+    c.libraryPath = "/usr/local/lib:/opt/hmi/lib:/usr/lib:/lib";   // EntryAad, docs/INSTALLATION.md
+    return c;
+}
+
 std::string HeadUnitConfig::missing() const {
     std::string names;
     struct {
@@ -113,6 +155,9 @@ std::string HeadUnitConfig::missing() const {
                  {"agentDir", &agentDir},       {"systemMount", &systemMount}, {"shell", &shell}};
     for (size_t i = 0; i < sizeof paths / sizeof paths[0]; ++i) {
         if (!absolute(*paths[i].value)) names += std::string(names.empty() ? "" : ", ") + paths[i].name;
+    }
+    if (!agentProgramsDir.empty() && !absolute(agentProgramsDir)) {
+        names += std::string(names.empty() ? "" : ", ") + "agentProgramsDir";
     }
     for (size_t i = 0; i < otherPluginDirs.size(); ++i) {
         if (!absolute(otherPluginDirs[i])) {
@@ -159,8 +204,8 @@ bool HeadUnitPlatform::prepare(std::string* error) {
         }
     }
     if (!fs::makeDirs(config_.stateDir, error) || !fs::makeDirs(config_.stagingDir, error) ||
-        !fs::makeDirs(config_.runDir, error) || !fs::makeDirs(config_.appsDir, error) ||
-        !fs::makeDirs(config_.dataDir, error) || !fs::makeDirs(config_.tmpDir, error)) {
+        !fs::makeDirs(config_.runDir, error) || !fs::makeDirs(config_.dataDir, error) ||
+        !fs::makeDirs(config_.tmpDir, error)) {
         return false;
     }
     startNote_.clear();
@@ -174,6 +219,21 @@ bool HeadUnitPlatform::prepare(std::string* error) {
         } else {
             startNote_ = "an agent that ended early left the system partition writable, and it could not be made read-only again: " + why;
         }
+    }
+    // The folders that hold programs, which may be on the system partition (EntryEvo, whose writable partition is
+    // noexec): made where they are not there yet, with a remount where they are on a read-only file system, and the
+    // partition put back at once. On NBT Evo both are on the writable partition, and nothing is remounted.
+    std::vector<std::string> programDirs(1, config_.appsDir);
+    if (!config_.agentProgramsDir.empty()) programDirs.push_back(config_.agentProgramsDir);
+    for (size_t i = 0; i < programDirs.size(); ++i) {
+        if (fs::isDir(programDirs[i])) continue;
+        bool made = makeWritable(programDirs[i], error) && fs::makeDirs(programDirs[i], error);
+        std::string why;
+        if (!restoreReadOnly(&why) && made) {
+            made = false;
+            if (error != 0) *error = why;
+        }
+        if (!made) return false;
     }
     return true;
 }

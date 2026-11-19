@@ -82,10 +82,16 @@ public:
         bool any() const { return trial || started; }
     };
 
-    explicit AgentHome(const std::string& dir) : dir_(dir) {}
+    // `dir` holds the files above; the versions' folders are in `versions`, which is `dir` unless it is given. A head
+    // unit whose writable partition is noexec (EntryEvo: /var/local) keeps the files there and the versions, which
+    // hold programs, on the system partition (Platform::agentVersionsDir). The starter finds that folder in the file
+    // `programs` beside the others (nbtstart.sh), which hu_install.sh writes.
+    explicit AgentHome(const std::string& dir) : dir_(dir), versions_(dir) {}
+    AgentHome(const std::string& dir, const std::string& versions) : dir_(dir), versions_(versions.empty() ? dir : versions) {}
 
     const std::string& dir() const { return dir_; }
-    std::string versionDir(const std::string& version) const { return dir_ + "/" + version; }
+    const std::string& versionsDir() const { return versions_; }
+    std::string versionDir(const std::string& version) const { return versions_ + "/" + version; }
 
     // Reads the three files. Nothing is written, and a folder that is not there reads as three missing files.
     Files read() const;
@@ -130,6 +136,7 @@ public:
 
 private:
     std::string dir_;
+    std::string versions_;
 };
 
 }  // namespace nbt

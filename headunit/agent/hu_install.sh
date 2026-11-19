@@ -14,7 +14,8 @@
 # Usage (SSH open; on the node the HMI runs on, e.g. after `on -f /net/hu-omap/ /bin/sh`):
 #   ksh /mnt/umassXXXXX/agent/hu_install.sh         release/agent/, copied to the stick as agent/
 #   ksh /mnt/umassXXXXX/payload/hu_install.sh       the package, unpacked onto the stick
-# A USB stick is noexec, so the script is handed to ksh and not started itself.
+#   sh /tmp/agent/hu_install.sh                     EntryEvo: release/agent-entryevo/, copied to /tmp as agent/
+# A USB stick is noexec, so the script is handed to ksh and not started itself. EntryEvo: see "EntryEvo" below.
 #
 # What it writes, all of it under /var/opt/nbtapp/agent (the plan document, "Agent updates"):
 #   <version>/nbtagent, <version>/nbtctl    copies of the two programs, from `version` beside this script
@@ -39,6 +40,20 @@
 AGENT_HOME=${NBT_TEST_AGENT_HOME:-/var/opt/nbtapp/agent}     # override only for host tests
 HAND_APP=${NBT_TEST_HAND_APP:-/opt/aa}                       # the same
 
+# EntryEvo (EntryNav2, Linux): a head unit with /var/local and /opt/hmi/data/ro and no /opt/hmi/ID5. Its /var/local
+# does not run programs, so the files above stay there and the versions' folders go to /opt/nbtapp/agent, on the
+# system partition, which is remounted for the copy and put back (`mount -o remount,rw|ro /`). The file `programs`
+# beside the others names that folder for the starter (nbtstart.sh), and the agent's build for EntryEvo goes by the
+# same folder (HeadUnitConfig::entryEvo). /opt/aa is EntryAad's, the Android Auto app, and is left alone.
+VERSIONS=$AGENT_HOME
+ENTRYEVO=
+if [ -z "$NBT_TEST_AGENT_HOME" ] && [ ! -d /opt/hmi/ID5 ] && [ -d /var/local ] && [ -d /opt/hmi/data/ro ]; then
+    ENTRYEVO=1
+    AGENT_HOME=/var/local/data/nbtapp/agent
+    VERSIONS=/opt/nbtapp/agent
+fi
+REMOUNTED=
+
 case $0 in
     */*) SRC=${0%/*} ;;
     *) SRC=. ;;
@@ -46,7 +61,17 @@ esac
 
 fail() {
     echo "hu_install: $*" >&2
+    put_back
     exit 1
+}
+
+# put_back: the system partition read-only again, if this script made it writable.
+put_back() {
+    if [ -n "$REMOUNTED" ]; then
+        REMOUNTED=
+        sync
+        mount -o remount,ro / || echo "hu_install: the system partition is still writable: mount -o remount,ro /, or restart the head unit" >&2
+    fi
 }
 
 for name in nbtagent nbtctl nbtlaunch.sh nbtstart.sh version; do
@@ -67,23 +92,34 @@ if [ -f "$AGENT_HOME/trial" ] || [ -f "$AGENT_HOME/trial.started" ]; then
     fail "an update of the agent was begun and is not finished: $AGENT_HOME holds trial or trial.started. Start the launcher and let the agent finish it"
 fi
 
-if [ -e "$AGENT_HOME/$VERSION" ]; then
+if [ -e "$VERSIONS/$VERSION" ]; then
     echo "hu_install: version $VERSION is there already, and this script writes over nothing." >&2
     echo "hu_install: To put it there anew, stop the agent, then:" >&2
-    echo "hu_install:   rm -rf $AGENT_HOME/$VERSION" >&2
+    if [ -n "$ENTRYEVO" ]; then
+        echo "hu_install:   mount -o remount,rw / && rm -rf $VERSIONS/$VERSION && mount -o remount,ro /" >&2
+    else
+        echo "hu_install:   rm -rf $VERSIONS/$VERSION" >&2
+    fi
     echo "hu_install: and run this script again." >&2
     exit 1
 fi
 
+if [ -n "$ENTRYEVO" ]; then
+    mount -o remount,rw / || fail "cannot make the system partition writable for $VERSIONS"
+    REMOUNTED=1
+    mkdir -p "$VERSIONS" || fail "cannot make $VERSIONS"
+fi
+
 # From here on a failure leaves a folder that is not whole. Nothing starts it, because current does not name it,
 # and the next run finds it and says how to remove it.
-mkdir "$AGENT_HOME/$VERSION" || fail "cannot make $AGENT_HOME/$VERSION"
-cp "$SRC/nbtagent" "$SRC/nbtctl" "$SRC/nbtlaunch.sh" "$SRC/nbtstart.sh" "$AGENT_HOME/$VERSION/" || fail "cannot copy the programs and the scripts to $AGENT_HOME/$VERSION"
-chmod 755 "$AGENT_HOME/$VERSION/nbtagent" "$AGENT_HOME/$VERSION/nbtctl" "$AGENT_HOME/$VERSION/nbtlaunch.sh" "$AGENT_HOME/$VERSION/nbtstart.sh" ||
-    fail "cannot make the programs and the scripts in $AGENT_HOME/$VERSION executable"
+mkdir "$VERSIONS/$VERSION" || fail "cannot make $VERSIONS/$VERSION"
+cp "$SRC/nbtagent" "$SRC/nbtctl" "$SRC/nbtlaunch.sh" "$SRC/nbtstart.sh" "$VERSIONS/$VERSION/" || fail "cannot copy the programs and the scripts to $VERSIONS/$VERSION"
+chmod 755 "$VERSIONS/$VERSION/nbtagent" "$VERSIONS/$VERSION/nbtctl" "$VERSIONS/$VERSION/nbtlaunch.sh" "$VERSIONS/$VERSION/nbtstart.sh" ||
+    fail "cannot make the programs and the scripts in $VERSIONS/$VERSION executable"
+put_back
 
 # Does the program start here at all, and is it the version the file beside it says?
-said=$("$AGENT_HOME/$VERSION/nbtagent" --version) || fail "$AGENT_HOME/$VERSION/nbtagent does not start here"
+said=$("$VERSIONS/$VERSION/nbtagent" --version) || fail "$VERSIONS/$VERSION/nbtagent does not start here"
 echo "hu_install: $said"
 case $said in
     "nbtagent $VERSION "*) ;;
@@ -95,17 +131,26 @@ cp "$SRC/nbtstart.sh" "$AGENT_HOME/launcher.new" || fail "cannot copy the starte
 chmod 755 "$AGENT_HOME/launcher.new" || fail "cannot make the starter executable"
 mv -f "$AGENT_HOME/launcher.new" "$AGENT_HOME/launcher" || fail "cannot put the starter in place"
 
+if [ "$VERSIONS" != "$AGENT_HOME" ]; then
+    echo "$VERSIONS" > "$AGENT_HOME/programs.new" || fail "cannot write $AGENT_HOME/programs.new"
+    mv -f "$AGENT_HOME/programs.new" "$AGENT_HOME/programs" || fail "cannot put $AGENT_HOME/programs in place"
+fi
+
 echo "$VERSION" > "$AGENT_HOME/current.new" || fail "cannot write $AGENT_HOME/current.new"
 mv -f "$AGENT_HOME/current.new" "$AGENT_HOME/current" || fail "cannot put $AGENT_HOME/current in place"
 
-echo "hu_install: version $VERSION is in $AGENT_HOME/$VERSION, and is the one the launcher starts."
-echo "hu_install: To start it:  $AGENT_HOME/launcher &"
+echo "hu_install: version $VERSION is in $VERSIONS/$VERSION, and is the one the launcher starts."
+if [ -n "$ENTRYEVO" ]; then
+    echo "hu_install: To start it:  sh $AGENT_HOME/launcher &      ($AGENT_HOME does not run programs itself)"
+else
+    echo "hu_install: To start it:  $AGENT_HOME/launcher &"
+fi
 echo "hu_install: Its log:      /tmp/nbtapp/log/agent.log, which a power down empties"
 echo "hu_install: Nothing starts it with the head unit. To have the iDrive plugin do that, once it has run well:"
 echo "hu_install:   echo on > $AGENT_HOME/autostart"
 
 # An app that was installed by hand, outside this system, keeps its files there. The agent's check aa-fix finds
 # it, and its fix moves its plugin aside and removes the rest when a person asks.
-if [ -d "$HAND_APP" ]; then
+if [ -z "$ENTRYEVO" ] && [ -d "$HAND_APP" ]; then
     echo "hu_install: $HAND_APP is there: an app that was installed by hand. Once the agent runs, nbtctl checks (or the phone app) says what it holds, and nbtctl checks fix aa-fix moves its plugin aside and removes the rest"
 fi

@@ -42,6 +42,7 @@ sys.path.insert(0, os.path.join(ROOT, "tools"))
 import agent_pkg  # noqa: E402
 import make_db  # noqa: E402
 import nbtpkg  # noqa: E402
+import platforms  # noqa: E402
 from agent_pkg import Refused  # noqa: E402
 
 PACKAGE_ID = "org.nbtapp.plugin"
@@ -51,8 +52,8 @@ LIB = "lib%s.so" % NAME
 FILES = (LIB, NAME + ".manifest", NAME + ".xml", make_db.TEXTS_ZIP, make_db.IMAGES_ZIP)
 TEMPLATE = os.path.join(ROOT, "plugin", "package", "manifest.json.in")
 VERSION_HEADER = os.path.join(ROOT, "src", "version.hpp")
-RELEASE = os.path.join(ROOT, "release", NAME)
-PKG_DIR = os.path.join(ROOT, "release", "pkg")
+RELEASE = os.path.join(platforms.RELEASE_ROOT, NAME)   # release/entryevo/NbtApp with NBT_PLATFORM=entryevo
+PKG_DIR = os.path.join(platforms.RELEASE_ROOT, "pkg")
 VERSION_TEXT = agent_pkg.VERSION_TEXT
 # The line the library logs when it is loaded: its version, and the commit it was built from.
 BUILD_LINE = rb"NBTApp plugin ([0-9A-Za-z.+-]{1,64}) \(build ([^)%]{1,80})\)"

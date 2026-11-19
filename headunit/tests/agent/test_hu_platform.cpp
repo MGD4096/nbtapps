@@ -167,6 +167,49 @@ static void testConfig() {
     CHECK(real.pluginsDir() == "/opt/hmi/ID5/data/ro/Plugins" && real.varPluginsDir() == "/var/opt/hmi/data/ID5/Plugins");
     std::vector<std::string> carScan = real.pluginScanDirs();
     CHECK(carScan.size() == 2 && carScan[0] == real.pluginsDir() && carScan[1] == real.varPluginsDir());
+    // NBT Evo keeps the agent's versions with its files, and looks for an app installed by hand.
+    CHECK(car.agentProgramsDir.empty() && real.agentVersionsDir() == real.agentHome() && real.checksHandApp());
+
+    // EntryEvo: the files and every ${data} on the writable /var/local, which runs no programs; the programs, the
+    // agent's versions and every ${app}, on the system partition, which is /; an HMI restart is a reboot; hooks
+    // under sh; and /opt/aa is the Android Auto app's, which aa-fix leaves alone.
+    HeadUnitConfig evo = HeadUnitConfig::entryEvo();
+    CHECK_IN(evo.missing(), evo.missing().empty());
+    CHECK(line(evo.remountWritable) == "/bin/mount -o remount,rw /" && line(evo.remountReadOnly) == "/bin/mount -o remount,ro /");
+    CHECK(line(evo.restartHmi) == "/sbin/reboot" && line(evo.reboot) == "/sbin/reboot" && evo.systemMount == "/");
+    CHECK(!has(":" + evo.hookPath + ":", "::") && !has(":" + evo.hookPath + ":", ":.:") && evo.shell == "/bin/sh");
+    HeadUnitPlatform entry(evo);
+    CHECK(entry.stateDir() == "/var/local/data/nbtapp" && entry.agentHome() == "/var/local/data/nbtapp/agent");
+    CHECK(entry.agentVersionsDir() == "/opt/nbtapp/agent" && entry.appDir("org.nbtapp.hello") == "/opt/nbtapp/apps/org.nbtapp.hello");
+    CHECK(entry.dataDir("org.nbtapp.hello") == "/var/local/data/nbtapp/data/org.nbtapp.hello");
+    CHECK(entry.pluginsDir() == "/opt/hmi/data/ro/Plugins" && !entry.checksHandApp());
+    // A folder of the agent's versions that is not absolute is a configuration that is not whole.
+    evo.agentProgramsDir = "opt/nbtapp/agent";
+    CHECK(has(evo.missing(), "agentProgramsDir"));
+
+    // prepare() on such a layout: the folders that hold programs are made on the read-only system partition with
+    // one remount each, and the partition is read-only again afterwards. Once they are there, nothing is remounted.
+    {
+        Car layout("entryevo-layout");
+        layout.config.appsDir = layout.root + "/system/opt/nbtapp/apps";
+        layout.config.agentProgramsDir = layout.root + "/system/opt/nbtapp/agent";
+        CarPlatform p(layout);
+        CHECK(p.agentVersionsDir() == layout.config.agentProgramsDir && p.agentHome() == layout.config.agentDir);
+        prepared(p);
+        CHECK(fs::isDir(layout.config.appsDir) && fs::isDir(layout.config.agentProgramsDir) && !layout.writable());
+        std::string said = layout.calls();
+        CHECK_IN(said, said == "mount rw\nmount ro\nmount rw\nmount ro\n");
+        CarPlatform again(layout);
+        prepared(again);
+        said = layout.calls();
+        CHECK_IN(said, said.empty() && !layout.writable());
+        // A remount that fails makes nothing, and says so.
+        Car stuck("entryevo-stuck");
+        stuck.config.appsDir = stuck.root + "/system/opt/nbtapp/apps";
+        stuck.set("fail-rw", "9");
+        CarPlatform s(stuck);
+        CHECK_IN(why, !s.prepare(&why) && !fs::isDir(stuck.config.appsDir) && !stuck.writable());
+    }
 
     // A machine that lacks a folder every head unit has is not one, or the configuration is wrong about it.
     // Either way nothing is made there.

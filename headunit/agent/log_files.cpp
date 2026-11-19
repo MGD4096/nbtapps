@@ -127,7 +127,8 @@ bool namesLogs(const Manifest& m) {
 void listPackageLogs(const Manifest& m, const Store& store, const Platform& platform, std::vector<LogFile>* out) {
     out->clear();
     // Where an absolute entry may not lead, whatever its text: the agent's own folders.
-    const std::string agentPlaces[] = {platform.stateDir(), platform.stagingDir(), platform.runDir(), platform.agentHome()};
+    const std::string agentPlaces[] = {platform.stateDir(), platform.stagingDir(), platform.runDir(), platform.agentHome(),
+                                       platform.agentVersionsDir()};
     std::vector<std::string> forbidden;
     for (size_t i = 0; i < sizeof agentPlaces / sizeof agentPlaces[0]; ++i) {
         std::string real = realPath(agentPlaces[i]);

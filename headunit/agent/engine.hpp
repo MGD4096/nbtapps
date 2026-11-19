@@ -245,6 +245,9 @@ private:
     // After an update of the agent is finished: removes the folders of every version but these two, the one
     // that runs and the one current names.
     void pruneVersions(const std::string& now, const std::string& before);
+    // Removes one version's folder of the agent (AgentHome::removeVersion), with the partition that holds it made
+    // writable for it and put back afterwards: on EntryEvo the versions are on the system partition.
+    void removeAgentVersion(const std::string& version);
 
     Platform* platform_;
     std::vector<TrustedKey> keys_;

@@ -205,6 +205,8 @@ bool deviceOf(std::string path, uint64_t* out) {
 }
 
 void detectHandApp(const CheckContext& context, CheckFinding* out) {
+    // On EntryEvo /opt/aa and the connector id 210 are the Android Auto app the user installed: nothing to fix.
+    if (!context.platform->checksHandApp()) return;
     Fence fence;
     std::string why;
     if (!fenceOf(context, &fence, &why)) return unknown(out, "the records of the installed packages cannot be read: " + why);
@@ -574,6 +576,7 @@ bool fenceOf(const CheckContext& context, Fence* out, std::string* error) {
     out->keep.push_back(p.stagingDir());
     out->keep.push_back(p.runDir());
     out->keep.push_back(p.agentHome());
+    if (p.agentVersionsDir() != p.agentHome()) out->keep.push_back(p.agentVersionsDir());
     // The folders that hold every package's ${app}, ${data} and ${tmp}.
     out->keep.push_back(fs::parentOf(p.appDir("x")));
     out->keep.push_back(fs::parentOf(p.dataDir("x")));

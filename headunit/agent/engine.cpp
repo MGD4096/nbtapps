@@ -668,7 +668,7 @@ bool Engine::recover(bool* found, StepReport* report, StepListener* listener) {
     const char* undoneCode = "interrupted";
     const char* undoneText = "the step was interrupted and has been undone";
     if (own && !committed) {
-        AgentHome::Files files = AgentHome(platform_->agentHome()).read();
+        AgentHome::Files files = AgentHome(platform_->agentHome(), platform_->agentVersionsDir()).read();
         if (files.current == begin.version) {
             confirmed = true;
         } else if (begin.version == agentVersion_) {
@@ -750,7 +750,7 @@ bool Engine::recover(bool* found, StepReport* report, StepListener* listener) {
                 report->error.fail(undoneCode, undoneText);
                 // The folder the new version of the agent was in, if a hook or the program itself left
                 // something in it that the journal does not know.
-                if (own && first.version != agentVersion_) AgentHome(platform_->agentHome()).removeVersion(first.version, 0);
+                if (own && first.version != agentVersion_) removeAgentVersion(first.version);
             } else {
                 report->outcome = kStepBroken;
                 report->error.fail("interrupted", "the step was interrupted and could not be undone");
@@ -770,11 +770,11 @@ bool Engine::recover(bool* found, StepReport* report, StepListener* listener) {
 // ---- the agent's own folder ---------------------------------------------------------------------------------------
 
 TrialState Engine::trialState() const {
-    return AgentHome::stateOf(AgentHome(platform_->agentHome()).read(), agentVersion_);
+    return AgentHome::stateOf(AgentHome(platform_->agentHome(), platform_->agentVersionsDir()).read(), agentVersion_);
 }
 
 bool Engine::beginTrial(const std::string& version, std::string* error) {
-    AgentHome home(platform_->agentHome());
+    AgentHome home(platform_->agentHome(), platform_->agentVersionsDir());
     if (!home.hasProgram(version)) {
         if (error != 0) *error = "version " + version + " of the agent is not in " + home.versionDir(version);
         return false;
@@ -785,7 +785,7 @@ bool Engine::beginTrial(const std::string& version, std::string* error) {
 }
 
 bool Engine::confirmTrial(std::string* error) {
-    AgentHome home(platform_->agentHome());
+    AgentHome home(platform_->agentHome(), platform_->agentVersionsDir());
     if (AgentHome::stateOf(home.read(), agentVersion_) != kOnTrial) {
         if (error != 0) *error = "this agent is not on trial";
         return false;
@@ -796,7 +796,7 @@ bool Engine::confirmTrial(std::string* error) {
 }
 
 void Engine::settleTrial() {
-    AgentHome home(platform_->agentHome());
+    AgentHome home(platform_->agentHome(), platform_->agentVersionsDir());
     AgentHome::Files files = home.read();
     TrialState state = AgentHome::stateOf(files, agentVersion_);
     // An update that is not this agent's to decide, or not decided yet, is left as it is.
@@ -805,22 +805,31 @@ void Engine::settleTrial() {
     if (state == kWayBack) {
         // The version that was tried, or was to be, goes before the file that names it: an agent that stops in
         // between finds the file again and comes back here.
-        if (!files.pending.empty() && files.pending != files.current) home.removeVersion(files.pending, 0);
+        if (!files.pending.empty() && files.pending != files.current) removeAgentVersion(files.pending);
         crash("settle");
     }
     if (state == kWayBack || state == kConfirmed) home.removeTrial(0);
 }
 
 void Engine::pruneVersions(const std::string& now, const std::string& before) {
-    AgentHome home(platform_->agentHome());
+    AgentHome home(platform_->agentHome(), platform_->agentVersionsDir());
     AgentHome::Files files = home.read();
     if (files.any()) return;
     std::vector<std::string> all;
     home.versions(&all);
     for (size_t i = 0; i < all.size(); ++i) {
         if (all[i] == now || all[i] == before || all[i] == agentVersion_ || all[i] == files.current) continue;
-        home.removeVersion(all[i], 0);
+        removeAgentVersion(all[i]);
     }
+}
+
+void Engine::removeAgentVersion(const std::string& version) {
+    AgentHome home(platform_->agentHome(), platform_->agentVersionsDir());
+    if (!validVersionName(version) || fs::kindOf(home.versionDir(version)) == fs::kNone) return;
+    std::string why;
+    // A partition that is writable already (NBT Evo's /var/opt) is left as it is, and nothing is remounted.
+    if (platform_->makeWritable(home.versionDir(version), &why)) home.removeVersion(version, 0);
+    platform_->restoreReadOnly(&why);
 }
 
 // ---- an install or upgrade ----------------------------------------------------------------------------------------
@@ -1416,7 +1425,7 @@ bool InstallStep::checkHmiIds() {
 // The agent's own package (engine.hpp): what is refused of it, by the manifest and the agent's folder alone, so a
 // plan makes these checks too.
 bool InstallStep::checkSelf() {
-    AgentHome home(platform()->agentHome());
+    AgentHome home(platform()->agentHome(), platform()->agentVersionsDir());
     AgentHome::Files files = home.read();
     const std::string& running = engine_->agentVersion_;
     if (files.any()) return fail("conflict", "an update of the agent is under way and not decided yet");
@@ -1494,7 +1503,7 @@ static bool shellReads(Platform* platform, const std::string& script, StepLog* l
 
 void Engine::settleStarter(std::string* said) {
     said->clear();
-    AgentHome home(platform_->agentHome());
+    AgentHome home(platform_->agentHome(), platform_->agentVersionsDir());
     AgentHome::Files files = home.read();
     // Only the version that is decided: one on trial may yet go, and the starter of its time with it.
     if (files.any() || files.current != agentVersion_) return;

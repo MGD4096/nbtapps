@@ -6,6 +6,10 @@ and updates packages over Bluetooth.
 
 > You install at your own risk; see the [README's disclaimer](README.md#disclaimer).
 
+> **EntryEvo (EntryNav2)**: this guide is for NBT Evo. An EntryEvo agent reaches the phone app by borrowing an SPP
+> instance of the car's Alps stack, which needs the file `alps-baseline` and has not been run on a car yet. Its
+> build, its install by hand and its Bluetooth are in the README's [EntryEvo](README.md#entryevo-entrynav2) section.
+
 ## What you need
 
 - **A BMW with an NBT Evo head unit**, and a root shell on it over SSH. This guide does not cover how to get

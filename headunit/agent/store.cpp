@@ -175,7 +175,7 @@ bool Store::loadAll(std::vector<InstalledPackage>* out, std::string* error) cons
 }
 
 std::string Store::appDir(const Manifest& of) const {
-    if (of.id == kAgentPackageId) return AgentHome(platform_->agentHome()).versionDir(of.version);
+    if (of.id == kAgentPackageId) return AgentHome(platform_->agentHome(), platform_->agentVersionsDir()).versionDir(of.version);
     return platform_->appDir(of.id);
 }
 

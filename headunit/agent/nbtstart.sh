@@ -13,6 +13,7 @@
 #   <version>/nbtagent        one version of the agent. A version's folder is never written over
 #   <version>/nbtlaunch.sh    that version's launcher: how its agent is started, and started again when it fails
 #   <version>/nbtstart.sh     the starter that version came with: see "A newer starter" below
+#   programs                  if it is there: the folder the versions' folders are in, in place of this one
 #   current                   one line: the version to start
 #   trial                     one line: a version that was placed and has not been tried
 #   trial.started             the same file once its one try has begun
@@ -84,7 +85,7 @@ EXIT_STOPPED=0
 EXIT_NO_RESTART=3
 EXIT_RESTART=4
 
-STARTER_REVISION=3
+STARTER_REVISION=4
 
 case $0 in
     */*) AGENT_HOME=${0%/*} ;;
@@ -97,6 +98,20 @@ TRIAL_LOG_DIR=$AGENT_HOME/log                       # on flash
 TRIAL_LOG=$TRIAL_LOG_DIR/trial.log
 LOCK=$LOG_DIR/launcher.pid                          # on the RAM disk: the one starter's process id
 SH=${NBT_TEST_LAUNCH_SH:-/bin/ksh}                  # what runs a version's launcher; override only for host tests
+# A head unit with no ksh (EntryEvo, whose shell is BusyBox's) runs it with sh.
+if [ -z "$NBT_TEST_LAUNCH_SH" ] && [ ! -x "$SH" ]; then SH=/bin/sh; fi
+
+# Where the versions' folders are: beside these files, unless the file `programs` names another folder, one
+# absolute path on one line. hu_install.sh writes it on a head unit whose partition for these files does not run
+# programs (EntryEvo: these files in /var/local, the versions in /opt/nbtapp/agent); the agent goes by the same
+# folder (Platform::agentVersionsDir).
+VERSIONS=$AGENT_HOME
+if [ -f "$AGENT_HOME/programs" ]; then
+    read -r PROGRAMS < "$AGENT_HOME/programs"
+    case $PROGRAMS in
+        /*) VERSIONS=$PROGRAMS ;;
+    esac
+fi
 
 say() { echo "launcher: $*" >> "$LOG"; }
 
@@ -112,7 +127,7 @@ name_of() {
 
 # there VERSION: whether that version is here to be started: its program, and its launcher.
 there() {
-    [ -n "$1" ] && [ -f "$AGENT_HOME/$1/nbtagent" ] && [ -x "$AGENT_HOME/$1/nbtagent" ] && [ -f "$AGENT_HOME/$1/nbtlaunch.sh" ]
+    [ -n "$1" ] && [ -f "$VERSIONS/$1/nbtagent" ] && [ -x "$VERSIONS/$1/nbtagent" ] && [ -f "$VERSIONS/$1/nbtlaunch.sh" ]
 }
 
 # choose: sets VERSION to the version to start now, or to nothing when there is none; TRYING to 1 when that
@@ -219,7 +234,7 @@ while :; do
         exit 1
     fi
     NBT_LAUNCH_STARTER=1 NBT_LAUNCH_TRIAL=$TRYING NBT_LAUNCH_NOTE="${NOTE:+$NOTE; }starter revision $STARTER_REVISION" \
-        "$SH" "$AGENT_HOME/$VERSION/nbtlaunch.sh" "$@" < /dev/null
+        "$SH" "$VERSIONS/$VERSION/nbtlaunch.sh" "$@" < /dev/null
     status=$?
     unset NBT_LAUNCH_DELAY     # the wait is before the first start only
     if [ $status -eq $EXIT_STOPPED ]; then exit 0; fi

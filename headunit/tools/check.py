@@ -17,6 +17,10 @@ Package checks (when release/pkg holds the plugin's package of that version, `ma
   - release/pkg/org.nbtapp.plugin-<version>.nbtpkg is a package, not signed, and byte for byte what
     tools/plugin_pkg.py makes of release/NbtApp now. Its manifest places that folder as ${plugins}/NbtApp/ and
     nothing else, asks for an HMI restart, and names the agent it requires
+With NBT_PLATFORM=entryevo (`make PLATFORM=entryevo check`) the folders are release/entryevo/NbtApp and
+release/entryevo/pkg, and the library is held to EntryEvo's ABI: hard-float calls, glibc's libraries
+(tools/platforms.py).
+
 Needs readelf (binutils) for the library checks.
 """
 import glob, os, re, shutil, subprocess, sys, zipfile
@@ -26,16 +30,17 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "tools"))
 import make_db
 import nbtpkg
+import platforms
 import plugin_pkg
 
 NAME = "NbtApp"
 XML = os.path.join(ROOT, "plugin", NAME + ".xml")
 MANIFEST = os.path.join(ROOT, "plugin", NAME + ".manifest")
-RELEASE = os.path.join(ROOT, "release", NAME)
+RELEASE = os.path.join(platforms.RELEASE_ROOT, NAME)
+SHOWN_RELEASE = os.path.join(platforms.SHOWN_ROOT, NAME)
+SHOWN_PKG = os.path.join(platforms.SHOWN_ROOT, "pkg")
 LIB = "lib%s.so" % NAME
 RELEASE_FILES = {LIB, NAME + ".manifest", NAME + ".xml", make_db.TEXTS_ZIP, make_db.IMAGES_ZIP}
-# libsocket: the plugin's link to the agent is a local socket (src/agent_link.hpp).
-NEEDED = {"libAppFramework.A.so", "libCoreFramework.A.so", "libstdc++.so.6", "libm.so.2", "libc.so.3", "libsocket.so.3"}
 
 failures = []
 
@@ -185,13 +190,13 @@ def check_release_files():
     before = len(failures)
     present = set(os.listdir(RELEASE))
     for name in sorted(RELEASE_FILES - present):
-        fail("release/%s/%s is missing" % (NAME, name))
+        fail("%s/%s is missing" % (SHOWN_RELEASE, name))
     for name in sorted(present - RELEASE_FILES):
-        fail("release/%s/%s should not be there (iDrive loads what it finds)" % (NAME, name))
+        fail("%s/%s should not be there (iDrive loads what it finds)" % (SHOWN_RELEASE, name))
     for name in (NAME + ".xml", NAME + ".manifest"):
         src, dst = os.path.join(ROOT, "plugin", name), os.path.join(RELEASE, name)
         if os.path.isfile(dst) and open(src, "rb").read() != open(dst, "rb").read():
-            fail("release/%s/%s differs from plugin/%s: run make pkg" % (NAME, name, name))
+            fail("%s/%s differs from plugin/%s: run make pkg" % (SHOWN_RELEASE, name, name))
     texts = os.path.join(RELEASE, make_db.TEXTS_ZIP)
     if os.path.isfile(texts):
         with zipfile.ZipFile(texts) as z:
@@ -210,7 +215,7 @@ def check_release_files():
                 elif z.read(entry) != open(os.path.join(make_db.ASSETS, name), "rb").read():
                     fail("%s %s differs from assets/%s: run make pkg" % (make_db.IMAGES_ZIP, entry, name))
     if len(failures) == before:
-        ok("release/%s: the five files, DBs match the sources" % NAME)
+        ok("%s: the five files, DBs match the sources" % SHOWN_RELEASE)
 
 
 def readelf(*args):
@@ -239,16 +244,19 @@ def check_library():
     flags = int(field("Flags").split(",")[0], 16) if field("Flags") else 0
     if flags >> 24 != 5:
         fail("%s is not EABI version 5 (flags 0x%x)" % (LIB, flags))
-    if flags & 0x400 or "Tag_ABI_VFP_args" in readelf("-A", path):
-        fail("%s uses the hard-float call ABI; the head unit is soft-float" % LIB)
+    float_abi = platforms.float_abi_problem(flags, readelf("-A", path))
+    if float_abi:
+        fail("%s %s" % (LIB, float_abi))
 
     dynamic = readelf("-d", path)
     soname = re.findall(r"\(SONAME\).*\[(.*)\]", dynamic)
     if soname != [LIB]:
         fail("%s soname is %s, expected %s" % (LIB, soname, LIB))
     needed = set(re.findall(r"\(NEEDED\).*\[(.*)\]", dynamic))
-    if needed != NEEDED:
-        fail("%s NEEDED is %s, expected %s" % (LIB, sorted(needed), sorted(NEEDED)))
+    needed_problem = platforms.needed_problem(needed, platforms.PLUGIN_NEEDED_EXACT, platforms.PLUGIN_NEEDED_REQUIRED,
+                                              platforms.PLUGIN_NEEDED_ALLOWED)
+    if needed_problem:
+        fail("%s NEEDED is %s: %s" % (LIB, sorted(needed), needed_problem))
 
     exported, imported = {}, set()
     for line in readelf("--dyn-syms", path).splitlines():
@@ -267,8 +275,9 @@ def check_library():
     for sym in sorted(s for s in imported if "3bmw" in s and s not in framework):
         fail("%s imports %s, which the HU Framework does not export (stubs/*.syms)" % (LIB, sym))
     if len(failures) == before:
-        ok("%s: ELF32 ARM EABI5 soft-float shared object, soname and NEEDED as expected, pluginAppInfo exported, "
-           "%d HU Framework imports all known" % (LIB, sum(1 for s in imported if "3bmw" in s)))
+        ok("%s: ELF32 ARM EABI5 %s shared object for %s, soname and NEEDED as expected, pluginAppInfo exported, "
+           "%d HU Framework imports all known" % (LIB, "hard-float" if platforms.HARD_FLOAT else "soft-float", platforms.NAME,
+                                                  sum(1 for s in imported if "3bmw" in s)))
 
 
 def check_version():
@@ -295,7 +304,7 @@ def check_version():
 def check_package(version):
     """The plugin's own package, as `make plugin-pkg` left it in release/pkg."""
     name = plugin_pkg.archive_name(version)
-    shown = os.path.join("release", "pkg", name)
+    shown = os.path.join(SHOWN_PKG, name)
     path = os.path.join(plugin_pkg.PKG_DIR, name)
     if not os.path.isfile(path):
         print("skip  %s does not exist: make plugin-pkg makes the plugin's package" % shown)
@@ -304,7 +313,7 @@ def check_package(version):
     try:
         _, fresh, manifest = plugin_pkg.build(RELEASE, version)
     except plugin_pkg.Refused as e:
-        fail("the plugin's package cannot be made of release/%s: %s" % (NAME, e))
+        fail("the plugin's package cannot be made of %s: %s" % (SHOWN_RELEASE, e))
         return
     template = "plugin/package/manifest.json.in"
     install = manifest.get("install", {})
@@ -323,11 +332,11 @@ def check_package(version):
         fail("%s is not a package: %s" % (shown, e))
         return
     if "signature" in info:
-        fail("%s is signed: `make plugin-release` puts the signed archive in release/pkg/signed" % shown)
+        fail("%s is signed: `make plugin-release` puts the signed archive in %s/signed" % (shown, SHOWN_PKG))
     elif data != fresh:
-        fail("%s is not the package of release/%s: make plugin-pkg" % (shown, NAME))
+        fail("%s is not the package of %s: make plugin-pkg" % (shown, SHOWN_RELEASE))
     if len(failures) == before:
-        ok("%s: version %s, the folder release/%s, %d bytes, not signed" % (shown, version, NAME, len(data)))
+        ok("%s: version %s, the folder %s, %d bytes, not signed" % (shown, version, SHOWN_RELEASE, len(data)))
 
 
 def main():
@@ -342,7 +351,7 @@ def main():
         if version is not None:
             check_package(version)
     else:
-        print("skip  release/%s does not exist: build first to check the release folder and the library" % NAME)
+        print("skip  %s does not exist: build first to check the release folder and the library" % SHOWN_RELEASE)
     if failures:
         print("\n%d check(s) failed" % len(failures))
         return 1

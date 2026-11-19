@@ -1,6 +1,7 @@
 # NBTApp
 
-A native iDrive app for BMW NBT Evo head units (iDrive 5/6, QNX Neutrino 6.5.0 SP1, ARMv7LE). For now it is
+A native iDrive app for BMW NBT Evo head units (iDrive 5/6, QNX Neutrino 6.5.0 SP1, ARMv7LE), and for EntryEvo
+(EntryNav2, Linux armhf) head units with `PLATFORM=entryevo` (see [EntryEvo](#entryevo-entrynav2)). For now it is
 small: an **NBTApp** entry in Media/Radio that opens a menu with five rows, **Start the agent**, **Pair a phone**,
 **Forget all phones**, **Reset Bluetooth link** and **About**. The first starts the install agent on a head unit
 with no console, the next two are the car's side of pairing a phone app with it (see
@@ -68,6 +69,125 @@ dependencies, `pluginAppInfo` exported, only HU Framework symbols that exist) an
 
 To link against a head unit's real HU Framework libraries instead of the stubs:
 `make lib FRAMEWORK_LIBDIR=/path/to/opt/hmi/ID5/lib`. The result is identical.
+
+## EntryEvo (EntryNav2)
+
+The same plugin and agent build for an EntryEvo head unit too: Linux 3.12, glibc 2.15, BusyBox, ARMv7 hard-float.
+That unit runs the same HmiMain3D with the same PluginApp ABI. The facts below are what the EntryEvo Android Auto
+project (EntryAad, `libEntryAad.so`) does on one; none of them has been read off a car with `hu_probe.sh` yet.
+
+```sh
+docker build -t entrynav2-tc:4.7 /path/to/EntryEvo-Android-Auto/toolchain    # GCC 4.7 armhf, once
+HU_ROOTFS=~/entrynav2/rootfs PLATFORM=entryevo ./build.sh                     # -> release/entryevo/NbtApp/ and pkg/
+PLATFORM=entryevo ./build.sh agent                                            # -> release/entryevo/agent/ and pkg/
+```
+
+`HU_ROOTFS` is a copy of the car's system. The plugin links against its `/opt/hmi/lib` and libraries, as
+`libEntryAad.so` does. The agent needs none: it links its C++ runtime and zlib in, and asks the car only for
+glibc. `make PLATFORM=entryevo check` and `agent-check` hold the result to EntryEvo's ABI (`tools/platforms.py`).
+
+What differs from NBT Evo:
+
+| | NBT Evo | EntryEvo |
+|---|---|---|
+| Plugin folder | `/opt/hmi/ID5/data/ro/Plugins` | `/opt/hmi/data/ro/Plugins` |
+| System partition | `/fs/sda0`, `mount -u -o rw\|ro` | `/`, `mount -o remount,rw\|ro /` |
+| Agent state, `${data}` | `/var/opt/nbtapp` | `/var/local/data/nbtapp` |
+| Agent versions, `${app}` | `/var/opt/nbtapp/agent`, `/var/opt/nbtapp/apps` | `/opt/nbtapp/agent`, `/opt/nbtapp/apps`, on the system partition: `/var/local` is `noexec` |
+| HMI restart | `OnOffDSICommander appreset` | none known: `/sbin/reboot` |
+| Shell | `/bin/ksh` | `/bin/sh` (BusyBox) |
+| Plugin log | slog | `/var/local/data/nbtapp/plugin.log`, only while `/var/local/data/nbtapp/plugin-log` is there |
+| Kill switch | `/var/opt/nbtapp/disable` | `/var/local/data/nbtapp/disable` |
+| Bluetooth serial | the agent's own serial service, beside the car's | a borrowed SPP instance of the Alps stack, over D-Bus, given back when it stops and whenever Android Auto starts (see [below](#bluetooth-serial-on-entryevo)); not yet run on a car |
+| Check `aa-fix` | looks for `/opt/aa`, connector 210 | off: those belong to EntryAad, the Android Auto app |
+
+- The agent's own folder is split in two on EntryEvo. The files the starter and the plugin write (`current`,
+  `trial`, `autostart`, `launcher`, ...) stay on the writable partition. The versions' folders, which hold programs,
+  go to `/opt/nbtapp/agent`. The file `programs` in the first folder names the second, for the starter
+  (`agent/nbtstart.sh`). The agent goes by `HeadUnitConfig::entryEvo()` (`agent/hu_platform.cpp`), and
+  `hu_install.sh` writes the file and remounts `/` for the copy.
+- Every `${app}` is on the system partition. A step remounts it for the files, but a hook runs with it read-only and
+  cannot write into its `${app}`. A package keeps what it writes in `${data}`.
+- `${var_plugins}` is `/var/opt/hmi/data/Plugins`, the NBT Evo folder's counterpart. No second plugin folder is known
+  on EntryEvo, so the agent refuses a package for it unless the folder that holds it is there.
+- The plugin's About page resolves its list model with `dlsym` when the page is shown. On a framework that lacks one
+  of those four symbols, the page stays empty and the log says so; nothing else changes.
+- The ids do not collide with EntryAad: its connector is 210 with focus 32752, and NBTApp's are 211 and 32754. Both
+  rows sit in Media after the Bluetooth audio row.
+
+By hand over SSH (ENET cable, as in EntryAad's `docs/INSTALLATION.md`), with `release/entryevo/` copied to `/tmp`:
+
+```sh
+mount -o remount,rw /
+mkdir -p /opt/hmi/data/ro/Plugins/NbtApp
+rm -f /opt/hmi/data/ro/Plugins/NbtApp/*
+cp /tmp/entryevo/NbtApp/* /opt/hmi/data/ro/Plugins/NbtApp/
+sync; mount -o remount,ro /
+sh /tmp/entryevo/agent/hu_install.sh                  # the agent: /opt/nbtapp/agent/<version>, files in /var/local
+sh /var/local/data/nbtapp/agent/launcher &            # start it now; or reboot and use Start the agent in iDrive
+/opt/nbtapp/agent/<version>/nbtctl info
+```
+
+Not yet done for EntryEvo: a run on a car, `hu_probe.sh` for Linux (it reads QNX), and the HMI restart without a
+reboot. The phone app's catalogue also has to tell the two platforms apart: their programs are not interchangeable.
+An agent refuses a version of itself that does not start (`--version`), but a plugin built for the other unit would
+simply not load.
+
+### Bluetooth serial on EntryEvo
+
+NBT Evo's serial listener (`agent/serial_link.hpp`) is built on that car's Bluetooth service and QNX's path space.
+None of it exists on EntryEvo. There the car's Bluetooth is the Alps "Evolution" stack, which programs drive over
+the system D-Bus (`org.alps.evolution`, `/org/alps/evolution/hli`). The stack has no free SPP instance: its
+instances belong to the car maker's phone apps. So the agent does what EntryAad does for Android Auto: it **borrows**
+an instance and gives it back (`agent/alps_serial.hpp`; the D-Bus side is `agent/alps_dbus.hpp`).
+
+1. It reads the instance's configuration `0x6203` (where its data goes). Before it changes anything, it writes a
+   journal (`alps-journal` in the state folder) with the instance, that value, and the UUIDs to put back.
+2. It sets `0x6203` to 1 (data over D-Bus) and reads it back. Then it sets the agent's UUID (`kSerialServiceUuid`) on
+   the instance's SDP record. The phone app connects to that UUID, as on NBT Evo.
+3. A phone's link (`BtApplDeviceConnectInd`, function 1) becomes a `Link` of kind `serial`. The agent asks `auth` of
+   it as of any serial link. Bytes from the phone come in `BtApplSppDataInd`. Bytes to it go in `BtApplSppDataReq` of
+   1,024 bytes, one at a time, each after the stack's `SendInd`, and none while flow control pauses.
+4. To give the instance back, it ends a link that is up, sets the saved UUIDs and `0x6203` again, reads `0x6203`
+   back, and only then removes the journal. It does this when the agent stops (up to 8 s), and when Android Auto
+   starts. A journal found at the next start is put back first.
+
+**Android Auto comes first.** EntryAad's supervisor takes its lock (`/tmp/entry-aad-wireless.lock`) before it looks
+at instance 0, and looks again every 5 s for two minutes. The agent reads `/proc/locks` every second, without taking
+the lock. While the lock is held, or EntryAad's own journal (`/tmp/entry-aa-service/bluetooth-retour.txt`) is
+there, the agent gives the instance back and borrows nothing. It borrows again 10 s after EntryAad is gone. While
+the agent has the instance, the car maker's phone app on it does not work over Bluetooth.
+
+**What has to be given.** The UUIDs on the instance cannot be read over D-Bus; EntryAad reads them out of the
+stack's memory. So the state folder needs the file `alps-baseline`: one line of hex, as EntryAad's supervisor logs
+it (`preflight: SPP 0: ... UUID=<hex>`, in `/tmp/entry-aa-service.log`, or `aa-supervisor --compat`). Only the two
+pairs EntryAad knows are accepted: `011101011101` (generic SPP) and the car maker's
+`0300000000decafade…cafe` pair. Without the file, Bluetooth serial stays off and the agent's log says how to get it.
+
+```sh
+echo 011101011101 > /var/local/data/nbtapp/alps-baseline     # the value EntryAad logged for this car
+```
+
+`nbtagent` does this without `--root` by default (`--no-bluetooth` turns it off). With `--root` it takes
+`--bluetooth`. `--alps-instance N` picks another instance than 0. `serial.reset` ends the link, or arms the next
+one. `serial.status` shows the borrow. The car does not dial phones here (`serial-dial` is not offered).
+
+What a car has to settle before this is trusted, in this order:
+
+- **Which instance.** EntryAad borrows 0 and never touches 1. Whose 1 is, and whether the agent should take it
+  instead and leave 0 to Android Auto, is unknown.
+- **A link that is already up.** A phone connected to the car maker's service on the instance before the agent took
+  it may keep its link, now served over D-Bus. The agent hands bytes that come without its own `ConnectInd` to
+  nobody, gives the instance back, and waits a minute. Whether the stack has a way to ask for the instance's state
+  first, over D-Bus (`Introspect` on `/org/alps/evolution/hli`), is the question.
+- **The address's byte order** in `BtApplDeviceConnectInd`. The agent keeps it as it comes; that only matters once
+  the car dials.
+- **Late confirmations.** The stack's `...Cfm` signals carry no serial. A request whose confirmation is late is
+  failed and tried again after 30 s, so a late `Cfm` could be read as the next request's.
+
+`tests/agent/test_alps_serial.cpp` runs all of this against a fake bus on the bench: the borrow, a link both ways
+with flow control, both ends closing, `serial.reset`, Android Auto taking over, foreign bytes, a timeout, stopping,
+a journal left behind, and the stack going away.
 
 ## Packages and the agent
 

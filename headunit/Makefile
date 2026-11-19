@@ -40,6 +40,24 @@
 #   make testdata   build/testdata/: good and deliberately broken .nbtpkg files for every reader's tests
 #   make icons      redraw assets/*.png             needs python3 + Pillow (host)
 #   make clean
+#
+# PLATFORM=entryevo builds the same plugin and agent for an EntryEvo (EntryNav2) head unit instead: Linux 3.12,
+# glibc 2.15, ARMv7 hard-float, with GCC 4.7 (arm-linux-gnueabihf) in the image entrynav2-tc:4.7, which the EntryEvo
+# Android Auto project's toolchain/Dockerfile makes. Everything goes to build/entryevo/ and release/entryevo/
+# (NbtApp/, agent/, pkg/), and the check targets hold it to EntryEvo's ABI (tools/platforms.py). The plugin links
+# against the HU Framework of a copy of the car's system in SYSROOT (default /sysroot; build.sh mounts HU_ROOTFS
+# there); the agent needs none: its Bluetooth serial borrows an SPP instance of the car's Alps stack over D-Bus,
+# with the car's libdbus loaded at run time (agent/alps_serial.hpp, alps_dbus.hpp). By hand, in the image:
+#   make PLATFORM=entryevo lib pkg     make PLATFORM=entryevo agent     (then plugin-pkg, check, agent-pkg,
+#                                                                         agent-check on the host)
+# The host targets (agent-test, agent-host, test-*, testdata) are the same whichever PLATFORM is given.
+
+PLATFORM ?= nbtevo
+ifneq ($(filter-out nbtevo entryevo,$(PLATFORM)),)
+$(error PLATFORM is nbtevo or entryevo)
+endif
+# The check and package tools read it (tools/platforms.py).
+export NBT_PLATFORM := $(PLATFORM)
 
 QCC ?= qcc
 
@@ -60,6 +78,26 @@ OUT   = release/NbtApp
 #   make lib FRAMEWORK_LIBDIR=/path/to/opt/hmi/ID5/lib
 FRAMEWORK_LIBDIR ?= $(BUILD)/stubs
 FRAMEWORK_LIBS = $(FRAMEWORK_LIBDIR)/libAppFramework.A.so $(FRAMEWORK_LIBDIR)/libCoreFramework.A.so
+PLUGIN_LDFLAGS = -Wl,-z,defs -Wl,--allow-shlib-undefined
+# -lsocket: the link to the agent is a local socket.
+PLUGIN_LDLIBS = -lsocket -lang-c++
+
+ifeq ($(PLATFORM),entryevo)
+# As the EntryEvo Android Auto project builds libEntryAad.so: GCC 4.7 armhf, PIC, hidden symbols but pluginAppInfo,
+# linked against the car's own libraries (its HU Framework in /opt/hmi/lib, and the libstdc++ HmiMain3D has).
+SYSROOT ?= /sysroot
+EE_ARCH  = -march=armv7-a -mfpu=neon -mfloat-abi=hard
+CXX      = arm-linux-gnueabihf-g++
+CXXFLAGS = -std=gnu++0x -O2 -Wall $(EE_ARCH) -fPIC -fvisibility=hidden -fvisibility-inlines-hidden -I./src \
+           -DNBT_ENTRYEVO -DNBT_APP_VERSION='"$(VERSION)"'
+OUT      = release/entryevo/NbtApp
+FRAMEWORK_LIBDIR = $(SYSROOT)/opt/hmi/lib
+EE_LIBDIRS = -L$(SYSROOT)/usr/lib -L$(SYSROOT)/lib -L$(SYSROOT)/usr/local/lib -L$(FRAMEWORK_LIBDIR)
+EE_RPATHLINK = -Wl,-rpath-link,$(SYSROOT)/usr/lib:$(SYSROOT)/lib:$(SYSROOT)/usr/local/lib:$(FRAMEWORK_LIBDIR)
+PLUGIN_LDFLAGS = -Wl,-z,defs -Wl,--allow-shlib-undefined $(EE_LIBDIRS) $(EE_RPATHLINK)
+# The About page's list model is looked up with dlsym (src/nbt_app.cpp).
+PLUGIN_LDLIBS = -ldl
+endif
 
 SRCS = src/nbt_app.cpp src/crc32.cpp
 # What the library takes from the agent: the frames, the JSON and the messages of the protocol, which it speaks to
@@ -74,18 +112,21 @@ HDRS = $(wildcard src/*.hpp) $(wildcard agent/*.hpp)
 .SECONDARY:
 
 all: lib pkg
+ifeq ($(PLATFORM),entryevo)
+	@echo [DONE] $(OUT): copy this folder to /opt/hmi/data/ro/Plugins/NbtApp
+else
 	@echo [DONE] $(OUT): copy this folder to /opt/hmi/ID5/data/ro/Plugins/NbtApp
+endif
 
 lib: $(OUT)/libNbtApp.so
 
 # -z defs: a declaration whose mangled name the HU Framework does not export fails here, not on the car.
 # --allow-shlib-undefined: the real HU Framework libraries have dependencies of their own that are not at hand.
-# -lsocket: the link to the agent is a local socket.
 $(OUT)/libNbtApp.so: $(SRCS) $(PLUGIN_AGENT_SRCS) $(HDRS) $(FRAMEWORK_LIBS) $(BUILD)/version
-	@echo [BUILD] $@ $(VERSION)
+	@echo [BUILD] $@ $(VERSION) for $(PLATFORM)
 	@mkdir -p $(OUT)
 	$(CXX) $(CXXFLAGS) -shared -Wl,-soname,libNbtApp.so -o $@ $(SRCS) $(PLUGIN_AGENT_SRCS) $(FRAMEWORK_LIBS) \
-	    -Wl,-z,defs -Wl,--allow-shlib-undefined -lsocket -lang-c++
+	    $(PLUGIN_LDFLAGS) $(PLUGIN_LDLIBS)
 
 # Rewritten only when VERSION changes, so a new version relinks the library and nothing else does.
 $(BUILD)/version: FORCE
@@ -154,7 +195,7 @@ AGENT_SRCS   = agent/sha256.cpp agent/json.cpp agent/inflate.cpp agent/ed25519.c
                agent/spp_service.cpp agent/spp_gate.cpp agent/node_reader.cpp agent/serial_link.cpp agent/programs.cpp \
                agent/serial_services.cpp agent/phones.cpp agent/agent_home.cpp agent/log_files.cpp agent/checks.cpp \
                agent/settings_file.cpp agent/settings.cpp agent/serial_report.cpp agent/presence.cpp \
-               agent/dial_rules.cpp agent/problem_log.cpp
+               agent/dial_rules.cpp agent/problem_log.cpp agent/alps_serial.cpp agent/alps_dbus.cpp
 AGENT_C_SRCS = agent/vendor/tweetnacl/tweetnacl.c
 AGENT_HDRS   = $(wildcard agent/*.hpp) $(wildcard agent/vendor/*/*.h)
 # src/*.hpp: test_plugin runs the plugin's screens about phones, which are headers, against an agent, and
@@ -260,6 +301,7 @@ run-agent-test_serial_report: TEST_ARGS = $(BENCH_WORK)
 run-agent-test_programs: TEST_ARGS = $(BENCH_WORK)/programs
 run-agent-test_serial_services: TEST_ARGS = $(BUILD)/testdata $(BENCH_WORK)
 run-agent-test_checks: TEST_ARGS = $(BUILD)/testdata $(BENCH_WORK)
+run-agent-test_alps_serial: TEST_ARGS = $(BENCH_WORK)
 
 run-agent-%: bench-image
 	@echo [TEST] agent/$*
@@ -285,6 +327,27 @@ AGENT_CFLAGS = -O2 -D_QNX_SOURCE -march=armv7-a -mfpu=vfpv3 -mfloat-abi=softfp
 # puts into the agent's folder as `launcher`. The test programs stay in build/agent/.
 AGENT_OUT = release/agent
 AGENT_SCRIPTS = hu_probe.sh hu_install.sh nbtlaunch.sh nbtstart.sh
+AGENT_AR = $(QCC) -Vgcc_ntoarmv7le -A
+AGENT_QNX_LIBS = $(AGENT_QNX)/libnbtagent.a -Wl,-Bstatic -lz -Wl,-Bdynamic -lsocket -lang-c++
+
+ifeq ($(PLATFORM),entryevo)
+# EntryEvo: plain executables (GCC 4.7 makes no PIE by default), hard-float, glibc 2.15 as the toolchain has it. Its
+# own C++ runtime and zlib (the armhf libz.a the image unpacks into HDR_ROOT) are linked in, so the programs ask the
+# car for glibc's libraries only and need no copy of its system to build. NBT_ENTRYEVO gives nbtagent its head-unit
+# mode without Bluetooth serial, and HeadUnitConfig::entryEvo().
+HDR_ROOT ?= /opt/hdr-armhf/usr
+TOOL_CXX      = arm-linux-gnueabihf-g++
+TOOL_CXXFLAGS = -O2 -Wall -std=gnu++0x -march=armv7-a -mfpu=neon -mfloat-abi=hard -DNBT_ENTRYEVO \
+                -I$(HDR_ROOT)/include -I$(HDR_ROOT)/include/arm-linux-gnueabihf \
+                -I$(HDR_ROOT)/include/dbus-1.0 -I$(HDR_ROOT)/lib/arm-linux-gnueabihf/dbus-1.0/include
+AGENT_CC      = arm-linux-gnueabihf-gcc
+AGENT_CFLAGS  = -O2 -march=armv7-a -mfpu=neon -mfloat-abi=hard
+AGENT_AR      = arm-linux-gnueabihf-ar rcs
+AGENT_QNX     = $(BUILD)/entryevo/agent
+AGENT_OUT     = release/entryevo/agent
+AGENT_QNX_LIBS = $(AGENT_QNX)/libnbtagent.a $(HDR_ROOT)/lib/arm-linux-gnueabihf/libz.a -static-libstdc++ -static-libgcc \
+                 -lpthread -lrt -ldl
+endif
 
 agent: $(AGENT_QNX)/libnbtagent.a $(addprefix $(AGENT_QNX)/,$(AGENT_TESTS) $(AGENT_PROGS)) \
        $(addprefix $(AGENT_OUT)/,$(AGENT_PROGS) $(AGENT_SCRIPTS) version)
@@ -315,6 +378,9 @@ agent-check:
 # agent-release signs it with the package key, whose private half is not in this repo, and the signed archive is
 # what a release carries and the catalogue records.
 AGENT_PKG_OUT = release/pkg
+ifeq ($(PLATFORM),entryevo)
+AGENT_PKG_OUT = release/entryevo/pkg
+endif
 
 agent-pkg:
 	python3 tools/agent_pkg.py build $(AGENT_OUT) -o $(AGENT_PKG_OUT)
@@ -335,9 +401,7 @@ $(AGENT_QNX)/%.o: agent/vendor/tweetnacl/%.c $(AGENT_HDRS)
 
 $(AGENT_QNX)/libnbtagent.a: $(call agent_objs,$(AGENT_QNX)) Makefile
 	@rm -f $@
-	$(QCC) -Vgcc_ntoarmv7le -A $@ $(filter %.o,$^)
-
-AGENT_QNX_LIBS = $(AGENT_QNX)/libnbtagent.a -Wl,-Bstatic -lz -Wl,-Bdynamic -lsocket -lang-c++
+	$(AGENT_AR) $@ $(filter %.o,$^)
 
 $(AGENT_QNX)/test_%: tests/agent/test_%.cpp $(AGENT_QNX)/libnbtagent.a $(AGENT_HDRS) $(AGENT_TEST_HDRS)
 	@echo [BUILD] $@

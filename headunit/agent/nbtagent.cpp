@@ -118,19 +118,35 @@
 #define NBT_APP_VERSION "unknown"
 #endif
 
-// The mode that works on a head unit is compiled for QNX only: no build for another machine holds code that would
-// take that machine's own /var/opt and /opt for a car's.
-#ifdef __QNXNTO__
+// The mode that works on a head unit is compiled for the head units only: QNX (NBT Evo), and the EntryEvo build
+// (NBT_ENTRYEVO, Linux armhf). No build for another machine holds code that would take that machine's own /var and
+// /opt for a car's. NBT Evo's Bluetooth serial (NBT_BLUETOOTH) is built on that car's Bluetooth service and QNX's
+// path space; EntryEvo's is a borrowed SPP instance of the Alps stack, below.
+#if defined(__QNXNTO__) || defined(NBT_ENTRYEVO)
 #define NBT_HEAD_UNIT 1
 #include <errno.h>
 #include <sys/stat.h>
 
 #include "hu_platform.hpp"
 #include "process.hpp"
-#include "serial_link.hpp"
 #if defined(NBT_TEST_KEYS) || defined(NBT_DEBUG_TCP) || defined(NBT_TEST_AGENT_VERSION)
 #error "the head unit's nbtagent takes no test key, has no debug TCP link and says its own version: those are for the test bench"
 #endif
+#endif
+#ifdef __QNXNTO__
+#define NBT_BLUETOOTH 1
+#include "serial_link.hpp"
+#endif
+#if defined(__QNXNTO__) && defined(NBT_ENTRYEVO)
+#error "NBT_ENTRYEVO is the Linux build for EntryEvo, not a QNX one"
+#endif
+// EntryEvo's Bluetooth serial is a borrowed SPP instance of the car's Alps stack, over D-Bus (alps_serial.hpp). It
+// is on without --root when the agent's state folder has the file alps-baseline (the UUIDs to put back), or a
+// journal of a borrow to finish; --no-bluetooth turns it off, and with --root it takes --bluetooth.
+#ifdef NBT_ENTRYEVO
+#include "alps_dbus.hpp"
+#include "alps_serial.hpp"
+#include "protocol_constants.hpp"
 #endif
 
 using namespace nbt;
@@ -141,7 +157,20 @@ static void onStop(int) { gStop = 1; }
 
 static int usage() {
     fprintf(stderr,
-#ifdef NBT_HEAD_UNIT
+#if defined(NBT_HEAD_UNIT) && !defined(NBT_BLUETOOTH)
+            "usage: nbtagent [--no-bluetooth] [--alps-instance N]        work on this head unit\n"
+            "       nbtagent --root DIR [--socket PATH] [--bluetooth [--alps-instance N]]\n"
+            "                                             work on a folder that stands in for one\n"
+            "  (no --root)     state in /var/local/data/nbtapp, programs in /opt/nbtapp, the socket at %s;\n"
+            "                  the system partition is remounted for a write and put back\n"
+            "  --bluetooth     also take phone apps' links over Bluetooth serial, on an SPP instance of the\n"
+            "                  car's Alps stack that the agent borrows and gives back: the default without\n"
+            "                  --root, once the state folder has the file alps-baseline. While the agent has\n"
+            "                  the instance, the car maker's phone app on it does not work over Bluetooth;\n"
+            "                  Android Auto (EntryAad) gets it back whenever it starts\n"
+            "  --no-bluetooth  the local socket only: the default with --root\n"
+            "  --alps-instance N  the instance to borrow (0 to 7; default 0, the one EntryAad borrows)\n"
+#elif defined(NBT_HEAD_UNIT)
             "usage: nbtagent [--no-bluetooth] [--decide MS] [--decide-hold] [--register-check S]\n"
             "                [--dial on|off] [--dial-poll F,L,T]     work on this head unit\n"
             "       nbtagent --root DIR [--socket PATH] [--bluetooth [--decide MS] [--decide-hold]\n"
@@ -188,7 +217,10 @@ static int usage() {
             "                  another IPv4 address, and only inside a Docker container\n"
 #endif
             "  --version\n"
-#ifdef NBT_HEAD_UNIT
+#if defined(NBT_HEAD_UNIT) && !defined(NBT_BLUETOOTH)
+            ,
+            kHeadUnitSocket
+#elif defined(NBT_HEAD_UNIT)
             ,
             kHeadUnitSocket, kSerialDecideMostMs, (unsigned)kSerialDecideMs, kSerialCheckMostS,
             SerialConfig().checkMs / 1000, DialConfig().pollFirstMs / 1000, DialConfig().pollFirstForMs / 1000,
@@ -230,13 +262,14 @@ struct Options {
     bool dialPoll;                 // --dial-poll was given, with these values
     DialConfig poll;
     std::string self;              // how this program was started, to start it again for the gate's check
+    int alpsInstance;              // --alps-instance; below 0: not given. EntryEvo's build only
 
     Options()
         : debugTcpPort(-1), debugTcpAddress("127.0.0.1"), bluetooth(-1), decideMs(0), decideHold(false), checkS(-1),
-          dial(-1), dialPoll(false) {}
+          dial(-1), dialPoll(false), alpsInstance(-1) {}
 };
 
-#ifdef NBT_HEAD_UNIT
+#ifdef NBT_BLUETOOTH
 // Set once Bluetooth serial has been tried: the car's service library may be loaded then, and its thread runs on
 // until the process ends.
 static bool gBluetoothTried = false;
@@ -321,6 +354,65 @@ static void waitForPhones(int ms) {
 }
 #endif
 
+#ifdef NBT_ENTRYEVO
+class AlpsLog : public SerialLog {
+public:
+    virtual void line(const std::string& line) { logLine(stderr, "bluetooth: " + line); }
+};
+
+// Bluetooth serial on EntryEvo: made once and never freed, as on NBT Evo, since threads of its own run in it.
+struct Alps {
+    AlpsLog log;
+    EntryAadWatch others;
+    DbusAlpsBus bus;
+    AlpsSerial* serial;
+    Alps() : bus(&log), serial(0) {}
+};
+
+// What the state folder says to give back (alps-baseline: one line of hex), the journal beside it, and the
+// instance; then the listener and the bus. 0 with the reason in the log if Bluetooth serial does not start.
+static Alps* startAlps(Platform* platform, const Options& options) {
+    Alps* alps = new Alps;
+    AlpsConfig config;
+    config.instance = (uint8_t)(options.alpsInstance >= 0 ? options.alpsInstance : 0);
+    config.journalPath = platform->stateDir() + "/alps-journal";
+    const std::string baselinePath = platform->stateDir() + "/alps-baseline";
+    std::string text, why;
+    if (fs::kindOf(baselinePath) != fs::kNone) {
+        if (fs::readFile(baselinePath, 1024, &text, &why)) {
+            size_t end = text.find_first_of(" \t\r\n");
+            if (end != std::string::npos) text.erase(end);
+            if (!alps::bytesOf(text, &config.baseline)) config.baseline.clear();
+        } else {
+            logLine(stderr, "bluetooth: " + baselinePath + " cannot be read: " + why);
+        }
+    }
+    alps->serial = new AlpsSerial(&alps->bus, &alps->others, &alps->log, config);
+    if (!alps->serial->open(&why)) {
+        logLine(stderr, "no Bluetooth serial link: " + why + ". " + baselinePath +
+                            " names the UUIDs that are on instance 0 before anything takes it, one line of hex: what "
+                            "EntryAad's supervisor logs as \"preflight: SPP 0: ... UUID=<hex>\" (/tmp/entry-aa-service.log), "
+                            "or aa-supervisor --compat");
+        return 0;
+    }
+    if (!alps->bus.open(alps->serial, &why)) {
+        logLine(stderr, "no Bluetooth serial link: " + why);
+        return 0;
+    }
+    if (!alps->serial->start(&why)) {
+        logLine(stderr, "no Bluetooth serial link: " + why);
+        alps->bus.close();
+        return 0;
+    }
+    char instance[8];
+    snprintf(instance, sizeof instance, "%u", (unsigned)config.instance);
+    logLine(stderr, std::string("Bluetooth serial: service '") + kSerialServiceName + "', UUID " + kSerialServiceUuid +
+                        ", on SPP instance " + instance + " of the Alps stack, which the agent borrows while nothing "
+                        "else needs it (Android Auto comes first) and gives back when it stops");
+    return alps;
+}
+#endif
+
 // Opens the socket: 0, or the exit status to end with. Both modes do this before they look at any state: an agent
 // that is already at work there answers on the socket, and this one then ends without having touched a journal
 // that is not its own to recover. Starting it again would find the same, and its status says so.
@@ -336,7 +428,7 @@ static int listenAt(const std::string& path, LocalListener* listener) {
 // brought the head unit down: this agent has run for long enough, or was stopped by somebody. Writes nothing
 // where there is no record, which is every start that the plugin did not make.
 static void forgetAutostarts(Platform* platform, const char* why) {
-    if (AgentHome(platform->agentHome()).forgetAutostarts()) {
+    if (AgentHome(platform->agentHome(), platform->agentVersionsDir()).forgetAutostarts()) {
         logLine(stderr, std::string("the starts with the head unit on record in ") + kAutostartBoots + " are forgotten: " + why);
     }
 }
@@ -383,7 +475,7 @@ static int serve(Platform* platform, LocalListener* listener, const std::string&
     }
 #endif
 
-#ifdef NBT_HEAD_UNIT
+#ifdef NBT_BLUETOOTH
     Bluetooth* bluetooth = 0;
     SerialReport* report = 0;
     if (options.bluetooth > 0) {
@@ -425,6 +517,15 @@ static int serve(Platform* platform, LocalListener* listener, const std::string&
     }
 #endif
 
+#ifdef NBT_ENTRYEVO
+    Alps* alps = options.bluetooth > 0 ? startAlps(platform, options) : 0;
+    if (alps != 0) {
+        agent.addListener(alps->serial);
+        agent.setSerialReset(alps->serial);
+        agent.setSerialDial(alps->serial);
+    }
+#endif
+
     if (agent.onTrial()) logLine(stderr, "ON TRIAL: this version stays only once a controller has asked for the job's status");
     bool saidStopping = false, handOver = false, settled = false;
     const int64_t startedMs = clock.nowMs();
@@ -449,7 +550,19 @@ static int serve(Platform* platform, LocalListener* listener, const std::string&
     // The phones are told that the agent is going, and why, and their links are closed here. A phone app ends its
     // link when it hears that, and connects again if a newer version is about to start.
     agent.endPhoneLinks(handOver ? kClosingRestarting : kClosingStopping, 2000);
-#ifdef NBT_HEAD_UNIT
+#ifdef NBT_ENTRYEVO
+    if (alps != 0) {
+        // The instance goes back before the process ends: the phone's link is ended, the UUIDs and 0x6203 are put
+        // back. What is not put back within the time stays in the journal, for the next start.
+        agent.setSerialReset(0);
+        agent.setSerialDial(0);
+        bool back = alps->serial->stop(8000);
+        alps->bus.close();
+        logLine(stderr, back ? "bluetooth: the SPP instance is back as it was"
+                             : "bluetooth: the SPP instance is not back yet: the next start puts it back from the journal");
+    }
+#endif
+#ifdef NBT_BLUETOOTH
     if (report != 0) {
         report->finish();
         delete report;
@@ -510,14 +623,20 @@ static int onFolder(Options options) {
 #ifdef NBT_HEAD_UNIT
 // On the head unit itself.
 static int onHeadUnit(Options options) {
+#ifdef NBT_ENTRYEVO
+    HeadUnitConfig config = HeadUnitConfig::entryEvo();
+    const char* const configName = "HeadUnitConfig::entryEvo()";
+#else
     HeadUnitConfig config = HeadUnitConfig::car();
+    const char* const configName = "HeadUnitConfig::car()";
+#endif
     std::string missing = config.missing();
     if (!missing.empty()) {
         fprintf(stderr,
                 "nbtagent: this build does not know enough about the head unit to work on it; not set: %s\n"
-                "nbtagent: hu_probe.sh reads those off a car, and HeadUnitConfig::car() (agent/hu_platform.cpp) is where\n"
+                "nbtagent: hu_probe.sh reads those off a car, and %s (agent/hu_platform.cpp) is where\n"
                 "nbtagent: they go. Nothing was touched. `nbtagent --root DIR` works on a folder instead.\n",
-                missing.c_str());
+                missing.c_str(), configName);
         return kExitNoRestart;
     }
     // Before prepare(): with an agent at work here, prepare() would take that agent's marker for one left by an
@@ -542,7 +661,7 @@ static int onHeadUnit(Options options) {
 #endif
 
 int main(int argc, char** argv) {
-#ifdef NBT_HEAD_UNIT
+#ifdef NBT_BLUETOOTH
     // The gate's check (SppNodeGate): this program run again, as any other program's look at the path.
     if (argc == 3 && strcmp(argv[1], "--look") == 0) {
         struct stat st;
@@ -564,7 +683,7 @@ int main(int argc, char** argv) {
         } else if (arg == "--socket" && value != 0 && *value != 0) {
             options.socketPath = value;
             ++i;
-#ifdef NBT_HEAD_UNIT
+#ifdef NBT_BLUETOOTH
         } else if (arg == "--bluetooth") {
             options.bluetooth = 1;
         } else if (arg == "--no-bluetooth") {
@@ -598,6 +717,21 @@ int main(int argc, char** argv) {
                 return kExitUsage;
             }
             options.dialPoll = true;
+            ++i;
+#endif
+#ifdef NBT_ENTRYEVO
+        } else if (arg == "--bluetooth") {
+            options.bluetooth = 1;
+        } else if (arg == "--no-bluetooth") {
+            options.bluetooth = 0;
+        } else if (arg == "--alps-instance" && value != 0) {
+            char* end = 0;
+            long n = strtol(value, &end, 10);
+            if (*value == 0 || *end != 0 || n < 0 || n > 7) {
+                fprintf(stderr, "nbtagent: --alps-instance takes an SPP instance from 0 to 7\n");
+                return kExitUsage;
+            }
+            options.alpsInstance = (int)n;
             ++i;
 #endif
 #ifdef NBT_TEST_KEYS
@@ -634,6 +768,8 @@ int main(int argc, char** argv) {
 #ifdef NBT_HEAD_UNIT
     // On the head unit the socket's place is fixed: see the top of this file.
     if (options.root.empty() && !options.socketPath.empty()) return usage();
+#endif
+#ifdef NBT_BLUETOOTH
     if (options.bluetooth < 0) options.bluetooth = options.root.empty() ? 1 : 0;
     if (options.bluetooth == 0 &&
         (options.decideMs != 0 || options.decideHold || options.checkS >= 0 || options.dial >= 0 || options.dialPoll)) {
@@ -645,7 +781,16 @@ int main(int argc, char** argv) {
         fprintf(stderr, "nbtagent: --dial-poll is about the dial, which --dial off turns off\n");
         return kExitUsage;
     }
-#else
+#endif
+#ifdef NBT_ENTRYEVO
+    if (options.bluetooth < 0) options.bluetooth = options.root.empty() ? 1 : 0;
+    if (options.bluetooth == 0 && options.alpsInstance >= 0) {
+        fprintf(stderr, "nbtagent: --alps-instance is about Bluetooth serial, which is off%s\n",
+                options.root.empty() ? "" : ": with --root it takes --bluetooth");
+        return kExitUsage;
+    }
+#endif
+#ifndef NBT_HEAD_UNIT
     if (options.root.empty()) return usage();
 #endif
 #ifdef NBT_DEBUG_TCP
@@ -671,7 +816,13 @@ int main(int argc, char** argv) {
     if (logPath != 0 && *logPath != 0) capLog(logPath, kLogCapBytes);
     unsetenv(kLogPathVariable);
 
-#ifdef NBT_HEAD_UNIT
+#if defined(NBT_HEAD_UNIT) && !defined(NBT_BLUETOOTH)
+#ifdef NBT_ENTRYEVO
+    // A dropped SSH session must still give the borrowed instance back. Without --root, SIGHUP is ignored instead.
+    if (options.bluetooth > 0 && !options.root.empty()) sigaction(SIGHUP, &action, 0);
+#endif
+    return options.root.empty() ? onHeadUnit(options) : onFolder(options);
+#elif defined(NBT_HEAD_UNIT)
     // A dropped SSH session must still take the registration away. Without --root, SIGHUP is ignored instead.
     if (options.bluetooth > 0 && !options.root.empty()) sigaction(SIGHUP, &action, 0);
     int rc = options.root.empty() ? onHeadUnit(options) : onFolder(options);

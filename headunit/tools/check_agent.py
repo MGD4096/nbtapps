@@ -28,16 +28,19 @@ is not there.
     unpacked onto a USB stick, that folder is what hu_install.sh is run from
 
 NEEDED is what the programs ask for, which is what the Bluetooth tools ask for too; hu_probe.sh lists what a head
-unit has.
+unit has. With NBT_PLATFORM=entryevo (`make PLATFORM=entryevo agent-check`) the folder is release/entryevo/agent and
+the programs are held to EntryEvo's ABI instead: hard-float calls, glibc's loader, and the libraries
+tools/platforms.py lets them ask for.
 Needs readelf (binutils).
 """
 import glob, hashlib, os, re, shutil, subprocess, sys
 
 import agent_pkg
 import nbtpkg
+import platforms
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-RELEASE = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else os.path.join(ROOT, "release", "agent")
+RELEASE = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else os.path.join(platforms.RELEASE_ROOT, "agent")
 SHOWN = os.path.relpath(RELEASE, ROOT) if len(sys.argv) <= 1 else RELEASE
 PKG = os.path.join(os.path.dirname(RELEASE), "pkg")
 SHOWN_PKG = os.path.join(os.path.dirname(SHOWN), "pkg")
@@ -54,8 +57,7 @@ FOR_SH = ("hu_install.sh", "nbtlaunch.sh", "nbtstart.sh")
 VERSION = "version"
 # A version's name as the two scripts take it: it names a folder on the head unit.
 VERSION_NAME = r"[0-9][0-9A-Za-z.+-]{0,63}"
-NEEDED = {"libsocket.so.3", "libcpp.so.4", "libc.so.3"}
-INTERPRETER = "/usr/lib/ldqnx.so.2"
+INTERPRETER = platforms.AGENT_INTERPRETER   # and NEEDED: tools/platforms.py, by NBT_PLATFORM
 BENCH_ONLY = (b"--test-key", b"--debug-tcp", b"TEST KEY", b"DEBUG TCP")
 
 failures = []
@@ -213,16 +215,19 @@ def check_program(name, keys, built_in):
     flags = int(field("Flags").split(",")[0], 16) if field("Flags") else 0
     if flags >> 24 != 5:
         fail("%s is not EABI version 5 (flags 0x%x)" % (name, flags))
-    if flags & 0x400 or "Tag_ABI_VFP_args" in readelf("-A", path):
-        fail("%s uses the hard-float call ABI; the head unit is soft-float" % name)
+    float_abi = platforms.float_abi_problem(flags, readelf("-A", path))
+    if float_abi:
+        fail("%s %s" % (name, float_abi))
 
     interpreter = re.findall(r"Requesting program interpreter: ([^\]]+)\]", readelf("-l", path))
     if interpreter != [INTERPRETER]:
         fail("%s asks for the interpreter %s, expected %s" % (name, interpreter, INTERPRETER))
     dynamic = readelf("-d", path)
     needed = set(re.findall(r"\(NEEDED\).*\[(.*)\]", dynamic))
-    if needed != NEEDED:
-        fail("%s NEEDED is %s, expected %s" % (name, sorted(needed), sorted(NEEDED)))
+    needed_problem = platforms.needed_problem(needed, platforms.AGENT_NEEDED_EXACT, platforms.AGENT_NEEDED_REQUIRED,
+                                              platforms.AGENT_NEEDED_ALLOWED)
+    if needed_problem:
+        fail("%s NEEDED is %s: %s" % (name, sorted(needed), needed_problem))
     paths = re.findall(r"\((RPATH|RUNPATH)\).*\[(.*)\]", dynamic)
     if paths:
         fail("%s has a library search path of its own: %s" % (name, paths))
@@ -247,14 +252,15 @@ def check_program(name, keys, built_in):
     build = re.search(rb"\(build ([^)%]{1,80})\), head unit", data)
     if len(failures) == before:
         holds = ", the package key %s" % " ".join(sorted(built_in)) if name == "nbtagent" and built_in else ""
-        ok("%s: ELF32 ARM EABI5 soft-float executable, not PIC, NEEDED %s, nothing of the test bench%s%s"
-           % (name, " ".join(sorted(needed)), holds,
+        ok("%s: ELF32 ARM EABI5 %s executable for %s, not PIC, NEEDED %s, nothing of the test bench%s%s"
+           % (name, "hard-float" if platforms.HARD_FLOAT else "soft-float", platforms.NAME, " ".join(sorted(needed)), holds,
               (", build " + build.group(1).decode("ascii", "replace")) if build else ""))
 
 
 def main():
     if not os.path.isdir(RELEASE):
-        print("FAIL  %s does not exist: ./build.sh agent builds release/agent" % SHOWN)
+        print("FAIL  %s does not exist: %s./build.sh agent builds %s/agent"
+              % (SHOWN, "PLATFORM=entryevo " if platforms.ENTRYEVO else "", platforms.SHOWN_ROOT))
         return 1
     if not shutil.which("readelf"):
         print("FAIL  readelf not found: cannot check the programs")

@@ -23,8 +23,9 @@
 //   - If the partition cannot be put back (something holds a file open for writing), restoreReadOnly says so and
 //     the next call tries again. Until then it stays writable; a reboot ends that too.
 //
-// ${app} on the system partition is not supported: prepare() makes the folder that holds every ${app}, so it has
-// to be on a file system that is writable without a remount.
+// ${app} on the system partition: prepare() makes the folder that holds every ${app}, and the folder of the
+// agent's versions, with a remount where they are on it (EntryEvo, whose writable partition is noexec). A hook
+// then runs with the system partition read-only, as every hook does, and cannot write into its ${app}.
 //
 // Two folders for what does not last. The run folder is on the RAM disk behind /tmp, which a power down empties
 // and which is small: it holds the marks. Staging holds the archives and is on the persistent partition, beside
@@ -54,6 +55,9 @@ struct HeadUnitConfig {
     std::string varPluginsDir; // ${var_plugins}: on a writable partition. It need not be there. Where its parent is
                                // not, a package that places files in it is refused
     std::string agentDir;      // the agent's own folder: its versions, and the files the launcher reads
+    std::string agentProgramsDir;   // where the versions' folders are, if not in agentDir: on a head unit whose
+                                    // agentDir is on a noexec partition. May be on the system partition
+    bool checkHandApp;         // the check aa-fix runs (Platform::checksHandApp)
     // Further folders the HMI loads plugins from, which no package places files in: only the ids in them are read.
     std::vector<std::string> otherPluginDirs;
     std::string systemMount;   // where the system partition is mounted; its read-only flag is the one that counts
@@ -77,12 +81,15 @@ struct HeadUnitConfig {
     uint64_t otherReserveBytes;       // and on every other file system
 
     HeadUnitConfig()
-        : commandTimeoutSeconds(20), restoreAttempts(5), restoreRetryMs(200), stateReserveBytes(32u << 20),
-          otherReserveBytes(64u << 10) {}
+        : checkHandApp(true), commandTimeoutSeconds(20), restoreAttempts(5), restoreRetryMs(200),
+          stateReserveBytes(32u << 20), otherReserveBytes(64u << 10) {}
 
     // What the repo knows about an NBT Evo head unit, and nothing it would have to guess. See the .cpp file for
     // where each value comes from and for what is left open.
     static HeadUnitConfig car();
+    // The same for an EntryEvo (EntryNav2) head unit: Linux, glibc 2.15, BusyBox; from what the EntryEvo Android
+    // Auto project (EntryAad) does on one. See the .cpp file.
+    static HeadUnitConfig entryEvo();
 
     // The names of the values that are not set, or not usable as they are, separated by ", ". Empty if the
     // configuration can be used.
@@ -116,6 +123,10 @@ public:
     virtual std::string pluginsDir() const { return config_.pluginsDir; }
     virtual std::string varPluginsDir() const { return config_.varPluginsDir; }
     virtual std::string agentHome() const { return config_.agentDir; }
+    virtual std::string agentVersionsDir() const {
+        return config_.agentProgramsDir.empty() ? config_.agentDir : config_.agentProgramsDir;
+    }
+    virtual bool checksHandApp() const { return config_.checkHandApp; }
     virtual std::vector<std::string> pluginScanDirs() const;
     virtual std::string systemPath(const std::string& absolute) const { return absolute; }
 
